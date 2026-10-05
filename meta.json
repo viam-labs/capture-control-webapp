@@ -1,0 +1,32 @@
+{
+  "$schema": "https://dl.viam.dev/module.schema.json",
+  "module_id": "devrel:robot-demo-capture-controller",
+  "visibility": "public",
+  "url": "",
+  "description": "robot-demo-capture-controller app",
+  "models": [
+    {
+      "api": "rdk:component:generic",
+      "model": "devrel:robot-demo-capture-controller:webapp"
+    }
+  ],
+  "applications": [
+    {
+      "name": "robot-demo-capture-controller",
+      "type": "single_machine",
+      "entrypoint": "dist/index.html"
+    }
+  ],
+  "entrypoint": "bin/robot-demo-capture-controller",
+  "first_run": "",
+  "build": {
+    "build": "make module.tar.gz",
+    "setup": "make setup",
+    "path": "module.tar.gz",
+    "arch": [
+      "linux/amd64",
+      "linux/arm64",
+      "darwin/arm64"
+    ]
+  }
+}

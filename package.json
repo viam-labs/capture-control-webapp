@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "@viamrobotics/sdk": "^0.76.0",
+    "typescript-cookie": "^1.0.6"
+  }
+}
