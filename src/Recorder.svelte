@@ -67,7 +67,9 @@
     const s = sensor;
     if (!s || !connected || active) return;
     s.getReadings()
-      .then((r) => (orphaned = cap.hasOpenSequence(r)))
+      .then((r) => {
+        if (!active) orphaned = cap.hasOpenSequence(r);
+      })
       .catch(() => {});
   });
 
@@ -104,14 +106,15 @@
       session = nextSession;
     } catch (e) {
       error = `Capture command failed: ${e instanceof Error ? e.message : e}`;
-      session = cap.stop(nextSession)[0];
       await send({ stop_capture: true }).catch(() => {});
+      session = cap.stop(nextSession)[0];
     } finally {
       busy = false;
     }
   }
 
   function startSession() {
+    if (busy) return;
     error = '';
     advanceRequested = stopRequested = false; // drop keys pressed during a previous session
     const snapshot = $state.snapshot(settings);
@@ -128,6 +131,7 @@
   }
 
   function onKey(e: KeyboardEvent) {
+    if (e.repeat) return;
     if (!active) return;
     if (e.code === 'Space') {
       e.preventDefault();
@@ -212,8 +216,8 @@
     {/if}
 
     {#if session}
-      <div class="status {session.phase}" aria-live="polite">
-        <strong>{LABELS[session.phase]}</strong>
+      <div class="status {session.phase}">
+        <strong aria-live="polite">{LABELS[session.phase]}</strong>
         {#if active}<div class="clock">{Math.ceil(cap.remainingMs(session, now) / 1000)}s</div>{/if}
         <div>Episode {session.episode} / {session.settings.episodes} · task:{session.settings.task}</div>
         {#if active}<small>space: next phase · esc: stop</small>{/if}
@@ -239,7 +243,7 @@
   form, .status { display: grid; gap: 10px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
   label { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
   input, select, button { font: inherit; padding: 6px 8px; }
-  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
   .status { margin-top: 12px; text-align: center; }
   .status strong { font-size: 24px; }
   .status.recording strong { color: var(--rec); }
