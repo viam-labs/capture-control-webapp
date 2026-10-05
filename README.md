@@ -32,6 +32,8 @@ Each episode becomes one Viam sequence tagged `task:<task>`, `session:<id>`, `fp
 
 ## Develop
 
+Requires Go and Node 22.18+ (tests use Node's built-in TypeScript support).
+
 ```bash
 make setup     # go deps + npm ci
 npm run dev    # Vite dev server
@@ -80,25 +82,6 @@ http://<machine-ip>:8888
 
 The port defaults to 8888 and can be configured via the `port` attribute in your component's config.
 
-### Offline mode (no internet)
+### Offline mode
 
-To use the local server without internet, viam-server needs an HTTP signaling endpoint. Add this to your machine's network config on app.viam.com (Raw JSON):
-
-```json
-{
-  "network": {
-    "no_tls": true
-  }
-}
-```
-
-Then your frontend needs to detect local mode and use local signaling instead of cloud signaling:
-
-```js
-const isLocal = document.cookie.includes('is_local=true');
-const signalingAddress = isLocal
-    ? `http://${window.location.hostname}:8080`
-    : 'https://app.viam.com';
-```
-
-**Note:** `no_tls` replaces the default HTTPS listener with an HTTP listener. This means traffic on the local network is unencrypted. This is acceptable for trusted networks (factory floor, home) but not recommended for public networks.
+Not supported in v1: the app always signals through `app.viam.com`, so the machine and browser need internet access.

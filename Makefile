@@ -46,8 +46,7 @@ module: test module.tar.gz
 all: test module.tar.gz
 
 setup:
-	go get github.com/erh/vmodutils@latest
-	go mod tidy
+	go mod download
 	npm ci
 
 clean:
