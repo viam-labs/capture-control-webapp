@@ -20,8 +20,8 @@
   "entrypoint": "bin/robot-demo-capture-controller",
   "first_run": "",
   "build": {
-    "build": "make module.tar.gz",
-    "setup": "make setup",
+    "build": "./build.sh",
+    "setup": "./setup.sh",
     "path": "module.tar.gz",
     "arch": [
       "linux/amd64",
