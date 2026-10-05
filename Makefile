@@ -12,6 +12,9 @@ endif
 
 .DEFAULT_GOAL := all
 
+$(ENTRYPOINT): package.json package-lock.json index.html vite.config.ts $(wildcard src/*)
+	npm run build
+
 $(MODULE_BINARY): Makefile go.mod *.go cmd/module/*.go $(ENTRYPOINT)
 	$(GO_BUILD_ENV) go build $(GO_BUILD_FLAGS) -o $(MODULE_BINARY) cmd/module/main.go
 
@@ -23,8 +26,9 @@ update:
 	go get github.com/erh/vmodutils@latest
 	go mod tidy
 
-test:
+test: $(ENTRYPOINT)
 	go test ./...
+	npm test
 
 module.tar.gz: meta.json $(MODULE_BINARY) $(ENTRYPOINT)
 ifeq ($(VIAM_TARGET_OS), windows)
@@ -44,6 +48,7 @@ all: test module.tar.gz
 setup:
 	go get github.com/erh/vmodutils@latest
 	go mod tidy
+	npm ci
 
 clean:
 	rm -rf bin module.tar.gz
