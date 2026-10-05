@@ -4,77 +4,41 @@ A Viam app module that serves your web app from your machine via the Viam SDK.
 
 For full documentation, see [Viam Apps](https://docs.viam.com/build-apps/hosting/overview/).
 
-## Build your frontend
+## Machine setup
 
-This module doesn't provide any frontend - bring your own using whatever framework you like (e.g. Svelte, Vue, React). This README assumes `npm` usage. For other package managers, adapt accordingly.
+1. Add the capture controller sensor (module `viam:capture-control`) and list the resources to record:
 
-> **Note:** Viam provides a set of utilities for Svelte that make it easy to integrate Viam into Svelte apps. See the [Viam Svelte SDK](https://github.com/viamrobotics/viam-svelte-sdk) for details.
-
-To connect to your machine, install the Viam SDK and cookie helper with your package manager:
-
-```
-npm install @viamrobotics/sdk typescript-cookie
-```
-
-A utility file is included at `auth.js` in the project root. Copy it into your frontend's source directory alongside the file that will import it.
-
-### Single machine
-
-```js
-import { createRobotClient } from '@viamrobotics/sdk';
-import { getHostAndCredentials } from './auth.js';
-
-const { host, credentials } = getHostAndCredentials();
-const machine = await createRobotClient({
-    host,
-    credentials,
-    signalingAddress: 'https://app.viam.com',
-});
-const resources = await machine.resourceNames();
+```json
+{
+  "name": "demo-capture",
+  "api": "rdk:component:sensor",
+  "model": "viam:capture-control:capture-control-sensor",
+  "attributes": {
+    "resources": [
+      { "resource_name": "arm", "method": "JointPositions" },
+      { "resource_name": "wrist-cam", "method": "GetImages" }
+    ]
+  }
+}
 ```
 
-### Multi machine
+2. Point the data manager at it, and add the sensor to the data manager's `depends_on`:
 
-```js
-import * as VIAM from '@viamrobotics/sdk';
-import { getMultiMachineCredentials } from './auth.js';
-
-const { credentials } = getMultiMachineCredentials();
-const client = await VIAM.createViamClient({ credentials });
-
-const machine = await client.connectToMachine({ id: '<machine-id>' });
-const resources = await machine.resourceNames();
+```json
+"attributes": { "capture_control_sensor": { "name": "demo-capture", "key": "overrides" } }
 ```
 
-Viam Apps expects the entrypoint of your app to be at `dist/index.html`. If your frontend builds into a subdirectory (e.g. `dist/build/index.html`), update the path in three places:
-- `meta.json`: the `entrypoint` field under `applications`
-- `Makefile`: the `ENTRYPOINT` variable
-- `module.go`: both the `//go:embed` path and the `fs.Sub` path in `distFS()`
+Each episode becomes one Viam sequence tagged `task:<task>`, `session:<id>`, `fps:<fps>`. Nothing is captured between episodes.
 
-**Important:** Your frontend must use relative paths in its build output (e.g. `./static/js/main.js`, not `/static/js/main.js`). Absolute paths will break when served from viamapplications.com or the local server. For Create React App, add `"homepage": "."` to your `package.json` to enable this.
+## Develop
 
-Multi machine apps don't include a built-in machine picker, but it's easy to set one up. See [Multi-machine applications](https://docs.viam.com/build-apps/hosting/hosting-reference/#multi-machine-applications) for details.
-
-After building your frontend into `dist/`, run `make` to build the module.
+```bash
+make setup     # go deps + npm ci
+npm run dev    # Vite dev server
+viam module local-app-testing --app-url http://localhost:5173 --machine-id <machine-id>  # injects credential cookies; open http://localhost:8012/start
+npm test       # session engine tests
+make           # go test + npm test + module.tar.gz
 ```
-make setup
-make
-```
-
-## Test during development
-
-Test your frontend against a real machine during development:
-
-1. Start your frontend dev server from your frontend's directory and note the port it starts on (the command depends on your framework, e.g. `npm run dev` for Vite or `npm start` for Create React App)
-2. In another terminal:
-   ```
-   viam module local-app-testing --app-url=http://localhost:<PORT> --machine-id=<YOUR_MACHINE_ID>
-   ```
-3. Open http://localhost:8012/start in your browser
-
-This injects real machine credentials into your dev server so you can test SDK connections without deploying.
-
-To check that your HTML/CSS renders without a machine connection, just open your HTML file directly in a browser.
 
 ## Upload to viamapplications.com
 
