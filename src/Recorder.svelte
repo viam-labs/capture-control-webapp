@@ -60,7 +60,8 @@
   let discoverTick = $state(0);
 
   let savers = $state<string[]>([]);
-  let homeSet = $state<string[]>(load('homeSet', []));
+  let homeSet = $state<string[]>(([] as unknown[]).concat(load('homeSet', []))
+    .filter((x): x is string => typeof x === 'string'));
   let homing = $state(false);
   let homeRequested = false;
   $effect(() => save('homeSet', $state.snapshot(homeSet)));
@@ -91,7 +92,7 @@
   // While recording, the open episode's chip is highlighted; a different pick shows as queued ("next").
   const shownTask = $derived(session?.phase === 'recording' ? session.episodeTask : activeTask);
   const queued = $derived(session?.phase === 'recording' && activeTask !== session.episodeTask);
-  const canStart = $derived(!!sensor && !orphaned && !!activeTask);
+  const canStart = $derived(!!sensor && !orphaned && !!activeTask && !homing);
 
   // Discover capture-control sensors by the shape of their readings.
   $effect(() => {
@@ -124,7 +125,7 @@
     Promise.all(
       names.map(async (name) => {
         try {
-          const r = await rb.withTimeout(new GenericServiceClient(client, name).doCommand({ command: 'status' }), rb.TELEOP_TIMEOUT_MS, name);
+          const r = await rb.withTimeout(new GenericServiceClient(client, name).doCommand({ command: 'status' }), rb.CALL_TIMEOUT_MS, name);
           return rb.asTeleopStatus(r) ? name : undefined;
         } catch {
           return undefined;
@@ -175,7 +176,7 @@
     let last: unknown;
     for (let i = 0; i < 3; i++) {
       try {
-        return await rb.withTimeout(sensor.doCommand(cmd), rb.TELEOP_TIMEOUT_MS, 'Capture command');
+        return await rb.withTimeout(sensor.doCommand(cmd), rb.CALL_TIMEOUT_MS, 'Capture command');
       } catch (e) {
         last = e;
         await new Promise((r) => setTimeout(r, 300));
@@ -210,7 +211,7 @@
     const t = teleop;
     if (!t) return;
     const recording = session?.phase === 'recording';
-    const call = (command: string) => rb.withTimeout(t.doCommand({ command }), rb.TELEOP_TIMEOUT_MS, `Teleop ${command}`);
+    const call = (command: string) => rb.withTimeout(t.doCommand({ command }), rb.CALL_TIMEOUT_MS, `Teleop ${command}`);
     busy = true;
     pollSeq++;
     try {
@@ -242,6 +243,7 @@
         homeSavers.map((name) => ({ name, setPosition: (p: number) => new SwitchClient(client, name).setPosition(p) })),
       );
       if (teleop) teleopStatus = { running: false, last_error: '' };
+      if (error.startsWith('Home failed') || error.startsWith('Teleop stop')) error = '';
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -334,7 +336,7 @@
       const t = teleop;
       const seq = pollSeq;
       if (!t || !connected) return void (teleopStatus = undefined);
-      rb.withTimeout(t.doCommand({ command: 'status' }), rb.TELEOP_TIMEOUT_MS, 'Teleop status')
+      rb.withTimeout(t.doCommand({ command: 'status' }), rb.CALL_TIMEOUT_MS, 'Teleop status')
         .then((r) => {
           if (seq === pollSeq) teleopStatus = rb.asTeleopStatus(r);
         })
@@ -492,7 +494,7 @@
         <fieldset>
           <legend>Home set (arm-position-saver switches). Home stops teleop, moves these, and leaves teleop off.</legend>
           {#each savers as n (n)}
-            <label class="check"><input type="checkbox" value={n} bind:group={homeSet} /> {n}</label>
+            <label class="check"><input type="checkbox" value={n} checked={homeSet.includes(n)} onchange={(e) => (homeSet = e.currentTarget.checked ? [...homeSet, n] : homeSet.filter((x) => x !== n))} /> {n}</label>
           {:else}
             <small>No <code>erh:vmodutils:arm-position-saver</code> switches found.</small>
           {/each}

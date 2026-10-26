@@ -5,7 +5,7 @@ export type DoCommander = { doCommand(cmd: { command: string }): Promise<unknown
 export type Saver = { name: string; setPosition(position: number): Promise<void> };
 export type TeleopStatus = { running: boolean; last_error: string };
 
-export const TELEOP_TIMEOUT_MS = 3_000;
+export const CALL_TIMEOUT_MS = 3_000;
 const MOVE_TIMEOUT_MS = 30_000;
 const GO_TO = 2; // arm-position-saver: 0 idle, 1 save current pose, 2 go to saved pose
 
@@ -43,7 +43,7 @@ export async function withTimeout<T>(p: Promise<T>, ms: number, what: string): P
  * and the follower would copy the fall at full streaming speed. The operator presses T.
  */
 export async function home(teleop: DoCommander | undefined, savers: Saver[], moveTimeoutMs = MOVE_TIMEOUT_MS): Promise<void> {
-  if (teleop) await withTimeout(teleop.doCommand({ command: 'stop' }), TELEOP_TIMEOUT_MS, 'Teleop stop');
+  if (teleop) await withTimeout(teleop.doCommand({ command: 'stop' }), CALL_TIMEOUT_MS, 'Teleop stop');
   // allSettled: every arm finishes (or fails) before we report, so nothing is still moving when busy clears.
   const results = await Promise.allSettled(savers.map(async (s) => withTimeout(s.setPosition(GO_TO), moveTimeoutMs, 'move')));
   const failed = savers.flatMap((s, i) => {
