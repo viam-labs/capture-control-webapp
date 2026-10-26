@@ -162,15 +162,16 @@
       session = nextSession;
       return;
     }
+    const prev = session; // if someone else (connection lost) changed the session mid-call, don't overwrite it
     busy = true;
     try {
       for (const c of cmds) await send(c);
-      session = nextSession;
+      if (session === prev) session = nextSession;
     } catch (e) {
       error = `Capture command failed: ${e instanceof Error ? e.message : e}`;
       await send({ stop_capture: true }).catch(() => {});
       // nextSession already counts every episode that ended; a failed start_capture never opened one.
-      session = { ...nextSession, phase: 'done' };
+      if (session === prev) session = { ...nextSession, phase: 'done' };
     } finally {
       busy = false;
     }
@@ -188,6 +189,7 @@
     try {
       const command = recording || rb.asTeleopStatus(await call('status'))?.running ? 'stop' : 'start';
       await call(command);
+      if (!recording) error = '';
       teleopStatus = { running: command === 'start', last_error: '' };
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
@@ -195,7 +197,10 @@
       pollSeq++; // also drop polls that were answered before the command took effect
       busy = false;
     }
-    if (recording && session?.phase === 'recording') await apply(cap.next(session, Date.now(), activeTask));
+    if (recording && session?.phase === 'recording') {
+      advanceRequested = false; // T already ended this episode; a Space queued during the call must not start the next
+      await apply(cap.next(session, Date.now(), activeTask));
+    }
   }
 
   function startSession() {
@@ -337,7 +342,7 @@
 
   {#snippet robotControls()}
     <div class="robot">
-      <button type="button" class="pill {teleopMode}" disabled={!teleop} onclick={() => (teleopRequested = true)} title={teleopStatus?.last_error || teleops[0] || ''}>
+      <button type="button" class="pill {teleopMode}" disabled={!teleop} onclick={(e) => { teleopRequested = true; e.currentTarget.blur(); }} title={teleopStatus?.last_error || teleops[0] || ''}>
         <span class="dot"></span>Teleop {teleopMode} <kbd>T</kbd>
       </button>
       {#if teleops.length > 1}
