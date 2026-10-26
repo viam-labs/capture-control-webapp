@@ -12,7 +12,7 @@ export type Step = [Session, Command[]];
 
 const STOP: Command = { stop_capture: true };
 
-export function tags(settings: Settings, id: string): string[] {
+function tags(settings: Settings, id: string): string[] {
   return [`task:${settings.task}`, `session:${id}`, `fps:${settings.fps}`];
 }
 

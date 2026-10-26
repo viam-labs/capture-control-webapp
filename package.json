@@ -1,8 +1,7 @@
 {
   "dependencies": {
     "@viamrobotics/sdk": "^0.76.0",
-    "@viamrobotics/svelte-sdk": "^1.5.3",
-    "typescript-cookie": "^1.0.6"
+    "@viamrobotics/svelte-sdk": "^1.5.3"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7.3.1",

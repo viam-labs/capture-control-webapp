@@ -1,86 +1,29 @@
-import { getCookie, setCookie } from 'typescript-cookie';
+const getCookie = (key) => {
+    const cookie = document.cookie.split('; ').find((c) => c.startsWith(key + '='));
+    return cookie && decodeURIComponent(cookie.slice(key.length + 1));
+};
 
-const DEFAULT_HOST = 'default-host';
+const apiKey = (host, id, key) => ({ host, credentials: { type: 'api-key', payload: key, authEntity: id } });
 
 export function getHostAndCredentials() {
+    // Set by the module's local web server.
     const host = getCookie('host');
-    const apiKeyId = getCookie('api-key-id');
-    const apiKeySecret = getCookie('api-key');
-    if (host && apiKeyId && apiKeySecret) {
-        return {
-            host,
-            credentials: {
-                type: 'api-key',
-                payload: apiKeySecret,
-                authEntity: apiKeyId
-            },
-            machineId: null
-        };
-    }
+    const id = getCookie('api-key-id');
+    const key = getCookie('api-key');
+    if (host && id && key) return apiKey(host, id, key);
 
+    // Set by viamapplications.com under /machine/<cookie-key>/.
     const parts = window.location.pathname.split('/');
-    if (parts && parts.length >= 3 && parts[1] == 'machine') {
-        const machineCookieKey = parts[2];
-        const cookieData = getCookie(machineCookieKey);
-        if (cookieData) {
-            try {
-                const parsed = JSON.parse(cookieData);
-                const id = parsed?.apiKey?.id;
-                const key = parsed?.apiKey?.key;
-                const h = parsed?.hostname;
-                const machineId = parsed?.machineId || null;
-                if (h && id && key) {
-                    return {
-                        host: h,
-                        credentials: { type: 'api-key', payload: key, authEntity: id },
-                        machineId
-                    };
-                }
-            } catch {
-                // Invalid cookie data
-            }
-        }
-    }
-
-    const savedInputCookie = getCookie(DEFAULT_HOST);
-    if (savedInputCookie) {
+    if (parts[1] === 'machine' && parts[2]) {
         try {
-            const { host, id: apiKeyId, key: apiKeySecret } = JSON.parse(savedInputCookie);
-            if (host && apiKeyId && apiKeySecret) {
-                return {
-                    host,
-                    credentials: { type: 'api-key', payload: apiKeySecret, authEntity: apiKeyId },
-                    machineId: null
-                };
+            const parsed = JSON.parse(getCookie(parts[2]) ?? '');
+            if (parsed?.hostname && parsed?.apiKey?.id && parsed?.apiKey?.key) {
+                return apiKey(parsed.hostname, parsed.apiKey.id, parsed.apiKey.key);
             }
         } catch {
-            // Invalid cookie data
+            // Missing or invalid cookie data
         }
     }
 
-    return {
-        host: '',
-        credentials: { type: 'api-key', payload: '', authEntity: '' },
-        machineId: null
-    };
-}
-
-export function saveHostInfo(host, id, key) {
-    setCookie(DEFAULT_HOST, JSON.stringify({ host, key, id }));
-}
-
-export function getMultiMachineCredentials() {
-    const userTokenRaw = getCookie('userToken');
-    if (!userTokenRaw) {
-        return { accessToken: '', credentials: { type: 'access-token', payload: '' } };
-    }
-    try {
-        const { access_token } = JSON.parse(userTokenRaw);
-        return {
-            accessToken: access_token,
-            credentials: { type: 'access-token', payload: access_token },
-        };
-    } catch {
-        return { accessToken: '', credentials: { type: 'access-token', payload: '' } };
-    }
+    return apiKey('', '', '');
 }

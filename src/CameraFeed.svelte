@@ -32,15 +32,13 @@
     const el = video;
     if (!client || !el) return;
     const streams = streamClientFor(client);
-    // Stream ids use '+' in place of ':' for remote resources.
-    const ids = [name, name.replaceAll(':', '+')];
     let lastRequest = 0;
 
     // Listen for the whole lifetime of the component, not once like getStream(): every
     // renegotiation (including after a reconnect) delivers a new track.
     const onTrack = (e: RTCTrackEvent) => {
       const [stream] = e.streams;
-      if (stream && ids.includes(stream.id)) el.srcObject = stream;
+      if (stream?.id === name) el.srcObject = stream;
     };
     streams.on('track', onTrack);
 
