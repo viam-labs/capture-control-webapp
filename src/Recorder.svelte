@@ -28,6 +28,12 @@
       localStorage.setItem(key, JSON.stringify(value));
     } catch {}
   }
+  // Stored lists may be hand-edited: keep unique strings only (keyed each blocks need unique keys).
+  const loadStrings = (key: string, fallback: string[]): string[] =>
+    [...new Set(([] as unknown[]).concat(load(key, fallback)).filter((x): x is string => typeof x === 'string'))];
+  // Probes each resource; keeps the results fn recognizes (fn returns undefined or throws for the rest).
+  const probe = async <T,>(names: string[], fn: (name: string) => Promise<T | undefined>): Promise<T[]> =>
+    (await Promise.all(names.map((n) => fn(n).catch(() => undefined)))).filter((x) => x !== undefined) as T[];
 
   const DEFAULTS: cap.Settings = { episodes: 10, episodeS: null, resetS: 10, fps: 10 };
   const { task: v1Task, ...storedSettings } = load<Partial<cap.Settings> & { task?: string }>('settings', {}); // v1 kept the task in settings
@@ -41,9 +47,7 @@
   let orphaned = $state(false);
 
   // Saved tasks (localStorage). activeTask is what the next episode records.
-  // Stored data may be hand-edited: keep unique strings only (the keyed each needs unique keys).
-  const storedTasks = ([] as unknown[]).concat(load('tasks', v1Task ? [v1Task] : []));
-  let tasks = $state<string[]>([...new Set(storedTasks.filter((x): x is string => typeof x === 'string'))]);
+  let tasks = $state<string[]>(loadStrings('tasks', v1Task ? [v1Task] : []));
   let activeTask = $state<string>(load('activeTask', ''));
   let formEl = $state<HTMLFormElement>();
   $effect(() => save('tasks', $state.snapshot(tasks)));
@@ -60,8 +64,7 @@
   let discoverTick = $state(0);
 
   let savers = $state<string[]>([]);
-  let homeSet = $state<string[]>(([] as unknown[]).concat(load('homeSet', []))
-    .filter((x): x is string => typeof x === 'string'));
+  let homeSet = $state<string[]>(loadStrings('homeSet', []));
   let homing = $state(false);
   let showKeys = $state(false);
   let homeRequested = false;
@@ -100,17 +103,11 @@
     const client = robot.current;
     const names = sensors.current.map((r) => r.name);
     if (!client || !connected || !sensors.query?.isSuccess) return;
-    Promise.all(
-      names.map(async (name) => {
-        try {
-          const r = await new SensorClient(client, name).getReadings();
-          return cap.isController(r) ? { name, resources: cap.controlledResources(r) } : undefined;
-        } catch {
-          return undefined;
-        }
-      }),
-    ).then((found) => {
-      controllers = found.filter((c) => c !== undefined);
+    probe(names, async (name) => {
+      const r = await new SensorClient(client, name).getReadings();
+      return cap.isController(r) ? { name, resources: cap.controlledResources(r) } : undefined;
+    }).then((found) => {
+      controllers = found;
       if (!controllers.some((c) => c.name === controllerName)) {
         controllerName = controllers.length === 1 ? controllers[0].name : '';
       }
@@ -123,16 +120,10 @@
     const names = generics.current.filter((r) => r.type === 'service').map((r) => r.name);
     discoverTick; // dependency: retry trigger from the status poll
     if (!client || !connected || !generics.query?.isSuccess) return;
-    Promise.all(
-      names.map(async (name) => {
-        try {
-          const r = await rb.withTimeout(new GenericServiceClient(client, name).doCommand({ command: 'status' }), rb.CALL_TIMEOUT_MS, name);
-          return rb.asTeleopStatus(r) ? name : undefined;
-        } catch {
-          return undefined;
-        }
-      }),
-    ).then((found) => (teleops = found.filter((n) => n !== undefined)));
+    probe(names, async (name) => {
+      const r = await rb.withTimeout(new GenericServiceClient(client, name).doCommand({ command: 'status' }), rb.CALL_TIMEOUT_MS, name);
+      return rb.asTeleopStatus(r) ? name : undefined;
+    }).then((found) => (teleops = found));
   });
 
   // Discover arm-position-saver switches by their position labels.
@@ -140,16 +131,7 @@
     const client = robot.current;
     const names = switches.current.map((r) => r.name);
     if (!client || !connected || !switches.query?.isSuccess) return;
-    Promise.all(
-      names.map(async (name) => {
-        try {
-          const [, labels] = await new SwitchClient(client, name).getNumberOfPositions();
-          return rb.isSaver(labels) ? name : undefined;
-        } catch {
-          return undefined;
-        }
-      }),
-    ).then((found) => (savers = found.filter((n) => n !== undefined)));
+    probe(names, async (name) => (rb.isSaver((await new SwitchClient(client, name).getNumberOfPositions())[1]) ? name : undefined)).then((found) => (savers = found));
   });
 
   // Orphan check: the sensor has no watchdog, so a closed tab can leave capture running.
@@ -221,7 +203,7 @@
       if (!recording) error = '';
       teleopStatus = { running: command === 'start', last_error: '' };
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      error = `Teleop toggle failed: ${e instanceof Error ? e.message : e}`;
     } finally {
       pollSeq++; // also drop polls that were answered before the command took effect
       busy = false;
@@ -229,6 +211,9 @@
     if (recording && session?.phase === 'recording') {
       advanceRequested = false; // T already ended this episode; a Space queued during the call must not start the next
       await apply(cap.next(session, Date.now(), activeTask));
+      // teleop may still be on if stop failed; never auto-start after an emergency stop
+      const after = session as cap.Session | undefined; // apply() reassigns session; TS can't see it
+      if (after?.phase === 'reset') session = cap.hold(after);
     }
   }
 
@@ -239,12 +224,9 @@
     busy = homing = true;
     pollSeq++;
     try {
-      await rb.home(
-        teleop,
-        homeSavers.map((name) => ({ name, setPosition: (p: number) => new SwitchClient(client, name).setPosition(p) })),
-      );
+      await rb.home(teleop, homeSavers.map((n) => new SwitchClient(client, n)));
       if (teleop) teleopStatus = { running: false, last_error: '' };
-      if (error.startsWith('Home failed') || error.startsWith('Teleop stop')) error = '';
+      if (error.startsWith('Home failed') || error.startsWith('Teleop stop failed')) error = '';
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -292,10 +274,12 @@
       showKeys = !showKeys;
     } else if (e.key === 'Escape' && showKeys) {
       showKeys = false;
+    } else if (showKeys && e.key !== 't' && e.key !== 'T') {
+      return; // overlay hides the drawer; only T (emergency stop) passes through
     } else if (/^[1-9]$/.test(e.key)) {
       selectTask(Number(e.key) - 1);
     } else if (e.key === 't' || e.key === 'T') {
-      if (teleop && !homing) teleopRequested = true;
+      if (teleop && connected && !homing) teleopRequested = true;
     } else if (e.key === 'h' || e.key === 'H') {
       if (canHome) homeRequested = true;
     } else if (e.key === 'Enter' && !active && !(e.target instanceof Element && e.target.closest('button, summary, a'))) {
@@ -516,7 +500,7 @@
       <table class="keys">
         <tbody>
           <tr><td>Space</td><td>End episode / start next episode</td></tr>
-          <tr><td>Esc</td><td>Stop session</td></tr>
+          <tr><td>Esc</td><td>Close this overlay / stop session</td></tr>
           <tr><td>1–9</td><td>Pick task (queued while recording)</td></tr>
           <tr><td>T</td><td>Toggle teleop. While recording: stop teleop and end the episode.</td></tr>
           <tr><td>H</td><td>Home arms; teleop stays off (not while recording)</td></tr>
