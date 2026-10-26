@@ -1,8 +1,9 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { MachineConnectionEvent, SensorClient } from '@viamrobotics/sdk';
+  import { GenericServiceClient, MachineConnectionEvent, SensorClient } from '@viamrobotics/sdk';
   import { useConnectionStatus, useResourceNames, useRobotClient } from '@viamrobotics/svelte-sdk';
   import * as cap from './capture.ts';
+  import * as rb from './robot.ts';
   import CameraFeed from './CameraFeed.svelte';
 
   let { partID }: { partID: string } = $props();
@@ -11,6 +12,7 @@
   const status = useConnectionStatus(() => partID);
   const sensors = useResourceNames(() => partID, 'sensor');
   const cameras = useResourceNames(() => partID, 'camera');
+  const generics = useResourceNames(() => partID, 'generic');
 
   function load<T>(key: string, fallback: T): T {
     try {
@@ -49,6 +51,13 @@
     if (!tasks.includes(activeTask)) activeTask = tasks[0] ?? '';
   });
 
+  let teleops = $state<string[]>([]);
+  let teleopStatus = $state<rb.TeleopStatus | undefined>();
+  let teleopRequested = false;
+  let pollSeq = 0; // bumped by toggles and homes so an older in-flight status poll can't overwrite the newer state
+  // Re-runs teleop discovery while none is found: no teleop means no teleop-off gate, so a slow start must not stick.
+  let discoverTick = $state(0);
+
   // The command driver's request flags (see onMount).
   let busy = false;
   let advanceRequested = false;
@@ -57,6 +66,9 @@
   const connected = $derived(status.current === MachineConnectionEvent.CONNECTED);
   const controller = $derived(controllers.find((c) => c.name === controllerName));
   const sensor = $derived(robot.current && controllerName ? new SensorClient(robot.current, controllerName) : undefined);
+  // Exactly one teleop service is used automatically; with none or several, T is disabled.
+  const teleop = $derived(robot.current && teleops.length === 1 ? new GenericServiceClient(robot.current, teleops[0]) : undefined);
+  const teleopMode = $derived(rb.teleopState(teleopStatus));
   // The svelte-sdk resets queries on disconnect (cameras.current → []); keep the last
   // known list so CameraFeed stays mounted and can recover its stream on reconnect.
   let cameraNames = $state<string[]>([]);
@@ -91,6 +103,24 @@
         controllerName = controllers.length === 1 ? controllers[0].name : '';
       }
     });
+  });
+
+  // Discover teleop services: generic services that answer {command: 'status'} with a boolean `running`.
+  $effect(() => {
+    const client = robot.current;
+    const names = generics.current.filter((r) => r.type === 'service').map((r) => r.name);
+    discoverTick; // dependency: retry trigger from the status poll
+    if (!client || !connected || !generics.query?.isSuccess) return;
+    Promise.all(
+      names.map(async (name) => {
+        try {
+          const r = await rb.withTimeout(new GenericServiceClient(client, name).doCommand({ command: 'status' }), rb.TELEOP_TIMEOUT_MS, name);
+          return rb.asTeleopStatus(r) ? name : undefined;
+        } catch {
+          return undefined;
+        }
+      }),
+    ).then((found) => (teleops = found.filter((n) => n !== undefined)));
   });
 
   // Orphan check: the sensor has no watchdog, so a closed tab can leave capture running.
@@ -146,10 +176,32 @@
     }
   }
 
+  // Runs only from the driver. While recording, T is an emergency stop: send stop with no status
+  // read first, then end the episode. Ending capture never depends on the teleop call.
+  async function toggleTeleop() {
+    const t = teleop;
+    if (!t) return;
+    const recording = session?.phase === 'recording';
+    const call = (command: string) => rb.withTimeout(t.doCommand({ command }), rb.TELEOP_TIMEOUT_MS, `Teleop ${command}`);
+    busy = true;
+    pollSeq++;
+    try {
+      const command = recording || rb.asTeleopStatus(await call('status'))?.running ? 'stop' : 'start';
+      await call(command);
+      teleopStatus = { running: command === 'start', last_error: '' };
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      pollSeq++; // also drop polls that were answered before the command took effect
+      busy = false;
+    }
+    if (recording && session?.phase === 'recording') await apply(cap.next(session, Date.now(), activeTask));
+  }
+
   function startSession() {
     if (busy || !canStart) return;
     error = '';
-    advanceRequested = stopRequested = false; // drop keys pressed during a previous session
+    advanceRequested = stopRequested = teleopRequested = false; // drop keys pressed during a previous session
     const snapshot = $state.snapshot(settings);
     save('settings', snapshot);
     apply(cap.start(snapshot, activeTask, crypto.randomUUID().slice(0, 8), Date.now()));
@@ -181,6 +233,8 @@
     if (e.target instanceof Element && e.target.closest('input, select, textarea')) return;
     if (/^[1-9]$/.test(e.key)) {
       selectTask(Number(e.key) - 1);
+    } else if (e.key === 't' || e.key === 'T') {
+      if (teleop) teleopRequested = true;
     } else if (e.key === 'Enter' && !active && !(e.target instanceof Element && e.target.closest('button, summary, a'))) {
       formEl?.requestSubmit();
     } else if (active && e.code === 'Space') {
@@ -195,17 +249,40 @@
     // The only place that sends session commands, so they never interleave.
     const timer = setInterval(async () => {
       now = Date.now();
-      if (!session || !active || busy) return;
-      if (stopRequested) {
+      if (busy) return;
+      const live = session && active ? session : undefined;
+      if (live && stopRequested) {
         stopRequested = advanceRequested = false;
-        await apply(cap.stop(session));
-      } else if (advanceRequested) {
+        await apply(cap.stop(live));
+      } else if (teleopRequested) {
+        teleopRequested = false;
+        await toggleTeleop();
+      } else if (live && advanceRequested) {
         advanceRequested = false;
-        await apply(cap.next(session, now, activeTask));
-      } else {
-        await apply(cap.tick(session, now, activeTask));
+        await apply(cap.next(live, now, activeTask));
+      } else if (live) {
+        const step = cap.tick(live, now, activeTask);
+        // Teleop-off gate: never auto-start an episode with nobody driving. Space still starts it.
+        if (live.phase === 'reset' && step[0].phase === 'recording' && teleop && teleopMode !== 'on') session = cap.hold(live);
+        else await apply(step);
       }
     }, 100);
+
+    // Read-only, so it runs outside the driver. pollSeq drops results that a toggle or home has superseded.
+    let polls = 0;
+    const poll = setInterval(() => {
+      if (!teleops.length && connected && ++polls % 10 === 0) discoverTick++; // ponytail: 10 s retry until found
+      const t = teleop;
+      const seq = pollSeq;
+      if (!t || !connected) return void (teleopStatus = undefined);
+      rb.withTimeout(t.doCommand({ command: 'status' }), rb.TELEOP_TIMEOUT_MS, 'Teleop status')
+        .then((r) => {
+          if (seq === pollSeq) teleopStatus = rb.asTeleopStatus(r);
+        })
+        .catch(() => {
+          if (seq === pollSeq) teleopStatus = undefined;
+        });
+    }, 1000);
 
     // Best effort: a closing tab can't await the result.
     const onHide = () => {
@@ -214,6 +291,7 @@
     addEventListener('pagehide', onHide);
     return () => {
       clearInterval(timer);
+      clearInterval(poll);
       removeEventListener('pagehide', onHide);
     };
   });
@@ -257,6 +335,19 @@
     </div>
   {/snippet}
 
+  {#snippet robotControls()}
+    <div class="robot">
+      <button type="button" class="pill {teleopMode}" disabled={!teleop} onclick={() => (teleopRequested = true)} title={teleopStatus?.last_error || teleops[0] || ''}>
+        <span class="dot"></span>Teleop {teleopMode} <kbd>T</kbd>
+      </button>
+      {#if teleops.length > 1}
+        <small class="hint">{teleops.length} teleop services found; T needs exactly one.</small>
+      {:else if !teleop}
+        <small class="hint">No devrel:so101:teleop service found.</small>
+      {/if}
+    </div>
+  {/snippet}
+
   <section class="cams {active ? session?.phase : ''}" style="--cols: {cols}">
     {#each cameraNames as name (name)}
       <CameraFeed {partID} {name} />
@@ -277,6 +368,10 @@
       </p>
     {/if}
 
+    {#if session?.phase === 'recording' && teleopMode === 'error'}
+      <p class="banner warn" role="alert">Teleop stopped itself: {teleopStatus?.last_error}. Space ends the episode.</p>
+    {/if}
+
     {#if !connected}
       <p>Connecting to machine…</p>
     {:else if controllers.length === 0}
@@ -288,10 +383,12 @@
       <div class="status {session.phase}">
         <strong aria-live="polite">{LABELS[session.phase]}</strong>
         <span class="clock">{clock}</span>
+        {#if session.phase === 'reset' && !Number.isFinite(cap.remainingMs(session, now))}<span>held, press space to start</span>{/if}
         <span>Episode {session.episode} / {session.settings.episodes} · task:{session.episodeTask}</span>
         <small>space: {session.phase === 'recording' ? 'end episode' : 'start next episode'} · esc: stop session</small>
       </div>
       {@render palette()}
+      {@render robotControls()}
     {:else}
       {#if session}
         <p class="last">
@@ -299,6 +396,7 @@
         </p>
       {/if}
       {@render palette()}
+      {@render robotControls()}
       <form
         bind:this={formEl}
         onsubmit={(e) => {
@@ -356,6 +454,13 @@
   .chip kbd, .chip small { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
   .chip em { font-size: 10px; font-style: normal; text-transform: uppercase; letter-spacing: 0.05em; }
   .add { width: 150px; border: 1px dashed var(--border); border-radius: 999px; }
+
+  .robot { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .pill { display: inline-flex; align-items: center; gap: 6px; border-radius: 6px; }
+  .pill .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .pill.on .dot { background: var(--done); }
+  .pill.error .dot { background: var(--rec); }
+  .pill kbd, .hint { font-size: 12px; color: var(--muted); }
 
   .status { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px; }
   .status strong { font-size: 20px; }
