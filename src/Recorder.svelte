@@ -12,7 +12,7 @@
   const sensors = useResourceNames(() => partID, 'sensor');
   const cameras = useResourceNames(() => partID, 'camera');
 
-  const DEFAULTS: cap.Settings = { task: '', episodes: 10, episodeS: null,resetS: 10, fps: 10 };
+  const DEFAULTS: cap.Settings = { task: '', episodes: 10, episodeS: null, resetS: 10, fps: 10 };
   function loadSettings(): cap.Settings {
     try {
       return { ...DEFAULTS, ...JSON.parse(localStorage.getItem('settings') ?? '{}') };
@@ -51,7 +51,7 @@
   $effect(() => {
     const client = robot.current;
     const names = sensors.current.map((r) => r.name);
-    if (!client || !connected) return;
+    if (!client || !connected || !sensors.query?.isSuccess) return;
     Promise.all(
       names.map(async (name) => {
         try {

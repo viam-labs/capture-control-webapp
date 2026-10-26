@@ -16,6 +16,7 @@
 </script>
 
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { MachineConnectionEvent } from '@viamrobotics/sdk';
   import { useConnectionStatus, useRobotClient } from '@viamrobotics/svelte-sdk';
 
@@ -48,7 +49,7 @@
     // stream is already added.
     const check = () => {
       const stream = el.srcObject as MediaStream | null;
-      live = !!stream?.getVideoTracks().some((t) => t.readyState === 'live');
+      live = !!stream?.getVideoTracks().some((t) => t.readyState === 'live' && !t.muted);
       if (live || status.current !== MachineConnectionEvent.CONNECTED) return;
       if (Date.now() - lastRequest < 5000) return;
       lastRequest = Date.now();
@@ -58,7 +59,7 @@
         .then(() => streams.add(name))
         .catch(() => {});
     };
-    check();
+    untrack(check);
     const timer = setInterval(check, 1000);
 
     return () => {
