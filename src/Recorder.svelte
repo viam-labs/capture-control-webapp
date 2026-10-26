@@ -1,8 +1,9 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { MachineConnectionEvent, SensorClient } from '@viamrobotics/sdk';
-  import { CameraStream, useConnectionStatus, useResourceNames, useRobotClient } from '@viamrobotics/svelte-sdk';
+  import { useConnectionStatus, useResourceNames, useRobotClient } from '@viamrobotics/svelte-sdk';
   import * as cap from './capture.ts';
+  import CameraFeed from './CameraFeed.svelte';
 
   let { partID }: { partID: string } = $props();
 
@@ -11,7 +12,7 @@
   const sensors = useResourceNames(() => partID, 'sensor');
   const cameras = useResourceNames(() => partID, 'camera');
 
-  const DEFAULTS: cap.Settings = { task: '', episodes: 10, episodeS: 20, resetS: 10, fps: 10 };
+  const DEFAULTS: cap.Settings = { task: '', episodes: 10, episodeS: null,resetS: 10, fps: 10 };
   function loadSettings(): cap.Settings {
     try {
       return { ...DEFAULTS, ...JSON.parse(localStorage.getItem('settings') ?? '{}') };
@@ -36,7 +37,14 @@
   const connected = $derived(status.current === MachineConnectionEvent.CONNECTED);
   const controller = $derived(controllers.find((c) => c.name === controllerName));
   const sensor = $derived(robot.current && controllerName ? new SensorClient(robot.current, controllerName) : undefined);
-  const cameraNames = $derived(cameras.current.map((r) => r.name).filter((n) => controller?.resources.includes(n)));
+  // The svelte-sdk resets queries on disconnect (cameras.current → []); keep the last
+  // known list so CameraFeed stays mounted and can recover its stream on reconnect.
+  let cameraNames = $state<string[]>([]);
+  $effect(() => {
+    if (!cameras.query?.isSuccess) return;
+    cameraNames = cameras.current.map((r) => r.name).filter((n) => controller?.resources.includes(n) ?? false);
+  });
+  const cols = $derived(cameraNames.length <= 1 ? 1 : cameraNames.length <= 4 ? 2 : 3);
   const active = $derived(session?.phase === 'recording' || session?.phase === 'reset');
 
   // Discover capture-control sensors by the shape of their readings.
@@ -169,12 +177,32 @@
   });
 
   const LABELS = { recording: '● RECORDING', reset: '◐ RESET', done: 'DONE' };
+  const fmt = (ms: number) => {
+    const t = Math.floor(ms / 1000);
+    return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`;
+  };
+  const clock = $derived.by(() => {
+    if (!session) return '';
+    const left = cap.remainingMs(session, now);
+    return Number.isFinite(left) ? fmt(left + 999) : `${fmt(cap.elapsedMs(session, now))} elapsed`;
+  });
 </script>
 
 <svelte:window onkeydown={onKey} />
 
 <main>
-  <section class="side">
+  <section class="cams {active ? session?.phase : ''}" style="--cols: {cols}">
+    {#each cameraNames as name (name)}
+      <CameraFeed {partID} {name} />
+    {:else}
+      <p class="empty">Cameras recorded by the capture controller appear here.</p>
+    {/each}
+    {#if session && active}
+      <div class="badge" aria-hidden="true">{LABELS[session.phase]} {clock}</div>
+    {/if}
+  </section>
+
+  <section class="drawer">
     {#if error}<p class="banner error" role="alert">{error}</p>{/if}
     {#if orphaned}
       <p class="banner warn" role="alert">
@@ -190,71 +218,81 @@
         No capture controller found. Add a <code>viam:capture-control:capture-control-sensor</code> and set the data
         manager's <code>capture_control_sensor</code> to <code>{'{"name": "<sensor>", "key": "overrides"}'}</code>.
       </p>
-    {:else if !active}
+    {:else if session && active}
+      <div class="status {session.phase}">
+        <strong aria-live="polite">{LABELS[session.phase]}</strong>
+        <span class="clock">{clock}</span>
+        <span>Episode {session.episode} / {session.settings.episodes} · task:{session.settings.task}</span>
+        <small>space: {session.phase === 'recording' ? 'end episode' : 'start next episode'} · esc: stop session</small>
+      </div>
+    {:else}
+      {#if session}
+        <p class="last">
+          <strong class="done">DONE</strong> · {session.episode} / {session.settings.episodes} episodes · task:{session.settings.task}
+        </p>
+      {/if}
       <form
         onsubmit={(e) => {
           e.preventDefault();
           startSession();
         }}
       >
+        <label class="wide">Task <input bind:value={settings.task} required placeholder="pick up the red cube" /></label>
         <label>Controller
           <select bind:value={controllerName} required>
             {#each controllers as c (c.name)}<option>{c.name}</option>{/each}
           </select>
         </label>
-        <label>Task <input bind:value={settings.task} required placeholder="pick up the red cube" /></label>
-        <div class="row">
-          <label>Episodes <input type="number" min="1" step="1" required bind:value={settings.episodes} /></label>
-          <label>FPS <input type="number" min="0.1" step="any" required bind:value={settings.fps} /></label>
-        </div>
-        <div class="row">
-          <label>Episode (s) <input type="number" min="1" required bind:value={settings.episodeS} /></label>
-          <label>Reset (s) <input type="number" min="0" required bind:value={settings.resetS} /></label>
-        </div>
+        <label>Episodes <input type="number" min="1" step="1" required bind:value={settings.episodes} /></label>
+        <label>Episode length (s)
+          <input type="number" min="1" placeholder="open-ended" bind:value={settings.episodeS} />
+        </label>
+        <label>Reset (s) <input type="number" min="0" required bind:value={settings.resetS} /></label>
+        <label>FPS <input type="number" min="0.1" step="any" required bind:value={settings.fps} /></label>
         <button type="submit" disabled={!sensor || orphaned}>Start session</button>
       </form>
     {/if}
-
-    {#if session}
-      <div class="status {session.phase}">
-        <strong aria-live="polite">{LABELS[session.phase]}</strong>
-        {#if active}<div class="clock">{Math.ceil(cap.remainingMs(session, now) / 1000)}s</div>{/if}
-        <div>Episode {session.episode} / {session.settings.episodes} · task:{session.settings.task}</div>
-        {#if active}<small>space: next phase · esc: stop</small>{/if}
-      </div>
-    {/if}
-  </section>
-
-  <section class="cams">
-    {#each cameraNames as name (name)}
-      <figure>
-        <CameraStream {partID} {name} />
-        <figcaption>{name}</figcaption>
-      </figure>
-    {:else}
-      <p class="muted">Cameras in the controller's resources appear here.</p>
-    {/each}
   </section>
 </main>
 
 <style>
-  main { display: grid; grid-template-columns: minmax(280px, 360px) 1fr; gap: 16px; padding: 16px; }
-  @media (max-width: 720px) { main { grid-template-columns: 1fr; } }
-  form, .status { display: grid; gap: 10px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
-  label { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
-  input, select, button { font: inherit; padding: 6px 8px; }
-  .row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
-  .status { margin-top: 12px; text-align: center; }
-  .status strong { font-size: 24px; }
+  main { display: grid; grid-template-rows: minmax(0, 1fr) auto; height: 100dvh; }
+
+  .cams {
+    position: relative; min-height: 0; padding: 8px; gap: 8px; background: #000;
+    display: grid; grid-template-columns: repeat(var(--cols), minmax(0, 1fr)); grid-auto-rows: minmax(0, 1fr);
+  }
+  .cams.recording :global(figure) { outline: 3px solid var(--rec); outline-offset: -3px; }
+  .cams.reset :global(figure) { outline: 3px solid var(--reset); outline-offset: -3px; }
+  .badge {
+    position: absolute; top: 16px; left: 16px; padding: 4px 10px; border-radius: 4px;
+    background: rgba(0, 0, 0, 0.6); color: #fff; font-weight: 700; font-variant-numeric: tabular-nums;
+  }
+  .cams.recording .badge { color: #ff6b6b; }
+  .cams.reset .badge { color: #ffb84d; }
+  .empty { color: #aaa; margin: auto; }
+
+  .drawer { display: grid; gap: 8px; padding: 12px 16px; background: var(--panel); border-top: 1px solid var(--border); }
+  form { display: flex; flex-wrap: wrap; align-items: end; gap: 8px 12px; }
+  label { display: grid; gap: 4px; flex: 1 1 110px; min-width: 0; font-size: 13px; color: var(--muted); }
+  label.wide { flex: 3 1 220px; }
+  input, select, button { font: inherit; padding: 6px 8px; box-sizing: border-box; }
+  input, select { width: 100%; min-width: 0; }
+  form button { flex: 0 0 auto; }
+
+  .status { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px; }
+  .status strong { font-size: 20px; }
   .status.recording strong { color: var(--rec); }
   .status.reset strong { color: var(--reset); }
-  .status.done strong { color: var(--done); }
-  .clock { font-size: 48px; font-variant-numeric: tabular-nums; }
-  .banner { padding: 8px 12px; border-radius: 6px; border: 1px solid; }
+  .clock { font-size: 28px; font-variant-numeric: tabular-nums; }
+  .last { margin: 0; }
+  .done { color: var(--done); }
+  .banner { margin: 0; padding: 8px 12px; border-radius: 6px; border: 1px solid; }
   .error { border-color: var(--rec); }
   .warn { border-color: var(--reset); }
-  .cams { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 8px; align-content: start; }
-  figure { margin: 0; }
-  figure :global(video) { width: 100%; background: #000; border-radius: 6px; }
-  figcaption, .muted { color: var(--muted); font-size: 13px; }
+
+  @media (max-width: 720px) {
+    main { height: auto; }
+    .cams { grid-template-columns: 1fr; grid-auto-rows: auto; }
+  }
 </style>
