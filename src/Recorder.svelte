@@ -12,22 +12,40 @@
   const sensors = useResourceNames(() => partID, 'sensor');
   const cameras = useResourceNames(() => partID, 'camera');
 
-  const DEFAULTS: cap.Settings = { task: '', episodes: 10, episodeS: null, resetS: 10, fps: 10 };
-  function loadSettings(): cap.Settings {
+  function load<T>(key: string, fallback: T): T {
     try {
-      return { ...DEFAULTS, ...JSON.parse(localStorage.getItem('settings') ?? '{}') };
+      const v = localStorage.getItem(key);
+      return v == null ? fallback : JSON.parse(v);
     } catch {
-      return { ...DEFAULTS };
+      return fallback;
     }
   }
+  function save(key: string, value: unknown) {
+    try {
+      localStorage.setItem(key, JSON.stringify(value));
+    } catch {}
+  }
+
+  const DEFAULTS: cap.Settings = { episodes: 10, episodeS: null, resetS: 10, fps: 10 };
+  const { task: v1Task, ...storedSettings } = load<Partial<cap.Settings> & { task?: string }>('settings', {}); // v1 kept the task in settings
 
   let controllers = $state<{ name: string; resources: string[] }[]>([]);
   let controllerName = $state('');
-  let settings = $state(loadSettings());
+  let settings = $state<cap.Settings>({ ...DEFAULTS, ...storedSettings });
   let session = $state.raw<cap.Session | undefined>();
   let now = $state(Date.now());
   let error = $state('');
   let orphaned = $state(false);
+
+  // Saved tasks (localStorage). activeTask is what the next episode records.
+  let tasks = $state<string[]>(load('tasks', v1Task ? [v1Task] : []));
+  let activeTask = $state<string>(load('activeTask', ''));
+  let formEl = $state<HTMLFormElement>();
+  $effect(() => save('tasks', $state.snapshot(tasks)));
+  $effect(() => save('activeTask', activeTask));
+  $effect(() => {
+    if (!tasks.includes(activeTask)) activeTask = tasks[0] ?? '';
+  });
 
   // The command driver's request flags (see onMount).
   let busy = false;
@@ -46,6 +64,10 @@
   });
   const cols = $derived(cameraNames.length <= 1 ? 1 : cameraNames.length <= 4 ? 2 : 3);
   const active = $derived(session?.phase === 'recording' || session?.phase === 'reset');
+  // While recording, the open episode's chip is highlighted; a different pick shows as queued ("next").
+  const shownTask = $derived(session?.phase === 'recording' ? session.episodeTask : activeTask);
+  const queued = $derived(session?.phase === 'recording' && activeTask !== session.episodeTask);
+  const canStart = $derived(!!sensor && !orphaned && !!activeTask);
 
   // Discover capture-control sensors by the shape of their readings.
   $effect(() => {
@@ -115,21 +137,20 @@
     } catch (e) {
       error = `Capture command failed: ${e instanceof Error ? e.message : e}`;
       await send({ stop_capture: true }).catch(() => {});
-      session = cap.stop(nextSession)[0];
+      // nextSession already counts every episode that ended; a failed start_capture never opened one.
+      session = { ...nextSession, phase: 'done' };
     } finally {
       busy = false;
     }
   }
 
   function startSession() {
-    if (busy) return;
+    if (busy || !canStart) return;
     error = '';
     advanceRequested = stopRequested = false; // drop keys pressed during a previous session
     const snapshot = $state.snapshot(settings);
-    try {
-      localStorage.setItem('settings', JSON.stringify(snapshot));
-    } catch {}
-    apply(cap.start(snapshot, crypto.randomUUID().slice(0, 8), Date.now()));
+    save('settings', snapshot);
+    apply(cap.start(snapshot, activeTask, crypto.randomUUID().slice(0, 8), Date.now()));
   }
 
   function stopOrphan() {
@@ -138,13 +159,30 @@
       .catch((e) => (error = `Stop failed: ${e instanceof Error ? e.message : e}`));
   }
 
+  function selectTask(i: number) {
+    if (tasks[i]) activeTask = tasks[i];
+  }
+
+  function addTask(e: KeyboardEvent & { currentTarget: HTMLInputElement }) {
+    if (e.key !== 'Enter') return;
+    const t = e.currentTarget.value.trim();
+    if (!t) return;
+    if (!tasks.includes(t)) tasks.push(t);
+    activeTask = t;
+    e.currentTarget.value = '';
+  }
+
   function onKey(e: KeyboardEvent) {
-    if (e.repeat) return;
-    if (!active) return;
-    if (e.code === 'Space') {
+    if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.target instanceof Element && e.target.closest('input, select, textarea')) return;
+    if (/^[1-9]$/.test(e.key)) {
+      selectTask(Number(e.key) - 1);
+    } else if (e.key === 'Enter' && !active && !(e.target instanceof Element && e.target.closest('button, summary, a'))) {
+      formEl?.requestSubmit();
+    } else if (active && e.code === 'Space') {
       e.preventDefault();
       advanceRequested = true;
-    } else if (e.key === 'Escape') {
+    } else if (active && e.key === 'Escape') {
       stopRequested = true;
     }
   }
@@ -159,9 +197,9 @@
         await apply(cap.stop(session));
       } else if (advanceRequested) {
         advanceRequested = false;
-        await apply(cap.next(session, now));
+        await apply(cap.next(session, now, activeTask));
       } else {
-        await apply(cap.tick(session, now));
+        await apply(cap.tick(session, now, activeTask));
       }
     }, 100);
 
@@ -191,6 +229,23 @@
 <svelte:window onkeydown={onKey} />
 
 <main>
+  {#snippet palette()}
+    <div class="palette" role="group" aria-label="Tasks">
+      {#each tasks as t, i (t)}
+        <span class="chip" class:active={t === shownTask} class:queued={queued && t === activeTask}>
+          <button type="button" onclick={() => selectTask(i)}>
+            {#if i < 9}<kbd>{i + 1}</kbd>{/if}
+            {t}
+            {#if session}<small>×{session.counts[t] ?? 0}</small>{/if}
+            {#if queued && t === activeTask}<em>next</em>{/if}
+          </button>
+          {#if !active}<button type="button" class="x" aria-label="Delete {t}" onclick={() => tasks.splice(i, 1)}>×</button>{/if}
+        </span>
+      {/each}
+      <input class="add" placeholder="+ add task" aria-label="Add task" onkeydown={addTask} />
+    </div>
+  {/snippet}
+
   <section class="cams {active ? session?.phase : ''}" style="--cols: {cols}">
     {#each cameraNames as name (name)}
       <CameraFeed {partID} {name} />
@@ -222,22 +277,24 @@
       <div class="status {session.phase}">
         <strong aria-live="polite">{LABELS[session.phase]}</strong>
         <span class="clock">{clock}</span>
-        <span>Episode {session.episode} / {session.settings.episodes} · task:{session.settings.task}</span>
+        <span>Episode {session.episode} / {session.settings.episodes} · task:{session.episodeTask}</span>
         <small>space: {session.phase === 'recording' ? 'end episode' : 'start next episode'} · esc: stop session</small>
       </div>
+      {@render palette()}
     {:else}
       {#if session}
         <p class="last">
-          <strong class="done">DONE</strong> · {session.episode} / {session.settings.episodes} episodes · task:{session.settings.task}
+          <strong class="done">DONE</strong> · {session.episode} / {session.settings.episodes} episodes
         </p>
       {/if}
+      {@render palette()}
       <form
+        bind:this={formEl}
         onsubmit={(e) => {
           e.preventDefault();
           startSession();
         }}
       >
-        <label class="wide">Task <input bind:value={settings.task} required placeholder="pick up the red cube" /></label>
         <label>Controller
           <select bind:value={controllerName} required>
             {#each controllers as c (c.name)}<option>{c.name}</option>{/each}
@@ -249,7 +306,7 @@
         </label>
         <label>Reset (s) <input type="number" min="0" required bind:value={settings.resetS} /></label>
         <label>FPS <input type="number" min="0.1" step="any" required bind:value={settings.fps} /></label>
-        <button type="submit" disabled={!sensor || orphaned}>Start session</button>
+        <button type="submit" disabled={!canStart}>Start session</button>
       </form>
     {/if}
   </section>
@@ -275,10 +332,19 @@
   .drawer { display: grid; gap: 8px; padding: 12px 16px; background: var(--panel); border-top: 1px solid var(--border); }
   form { display: flex; flex-wrap: wrap; align-items: end; gap: 8px 12px; }
   label { display: grid; gap: 4px; flex: 1 1 110px; min-width: 0; font-size: 13px; color: var(--muted); }
-  label.wide { flex: 3 1 220px; }
   input, select, button { font: inherit; padding: 6px 8px; box-sizing: border-box; }
   input, select { width: 100%; min-width: 0; }
   form button { flex: 0 0 auto; }
+
+  .palette { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .chip { display: inline-flex; align-items: center; border: 1px solid var(--border); border-radius: 999px; overflow: hidden; }
+  .chip button { border: 0; background: none; padding: 4px 10px; display: inline-flex; gap: 6px; align-items: baseline; cursor: pointer; }
+  .chip button.x { padding: 4px 8px 4px 0; color: var(--muted); }
+  .chip.active { border-color: currentColor; font-weight: 600; }
+  .chip.queued { border-style: dashed; }
+  .chip kbd, .chip small { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .chip em { font-size: 10px; font-style: normal; text-transform: uppercase; letter-spacing: 0.05em; }
+  .add { width: 150px; border: 1px dashed var(--border); border-radius: 999px; }
 
   .status { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px; }
   .status strong { font-size: 20px; }
