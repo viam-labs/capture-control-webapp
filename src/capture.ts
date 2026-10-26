@@ -1,9 +1,10 @@
 // Recording-session engine. Pure: no Svelte or SDK imports. Each transition returns the
 // next session plus the DoCommands to send to the capture-control-sensor, in order.
 
-export type Settings = { task: string; episodes: number; episodeS: number; resetS: number; fps: number };
+export type Settings = { task: string; episodes: number; episodeS: number | null; resetS: number; fps: number };
 export type Phase = 'recording' | 'reset' | 'done';
-export type Session = { id: string; settings: Settings; phase: Phase; episode: number; endsAt: number };
+// startedAt/endsAt bound the current phase; endsAt is Infinity for an open-ended episode.
+export type Session = { id: string; settings: Settings; phase: Phase; episode: number; startedAt: number; endsAt: number };
 export type Command =
   | { start_capture: true; frequency_hz: number; tags: string[] }
   | { stop_capture: true };
@@ -20,8 +21,11 @@ function startCapture(s: Session): Command {
   return { start_capture: true, frequency_hz: s.settings.fps, tags: tags(s.settings, s.id) };
 }
 
+// null seconds = open-ended: the phase only ends via next() (space bar).
+const until = (now: number, seconds: number | null): number => (seconds == null ? Infinity : now + seconds * 1000);
+
 export function start(settings: Settings, id: string, now: number): Step {
-  const s: Session = { id, settings, phase: 'recording', episode: 1, endsAt: now + settings.episodeS * 1000 };
+  const s: Session = { id, settings, phase: 'recording', episode: 1, startedAt: now, endsAt: until(now, settings.episodeS) };
   return [s, [startCapture(s)]];
 }
 
@@ -29,10 +33,16 @@ export function start(settings: Settings, id: string, now: number): Step {
 export function next(s: Session, now: number): Step {
   if (s.phase === 'recording') {
     if (s.episode >= s.settings.episodes) return [{ ...s, phase: 'done' }, [STOP]];
-    return [{ ...s, phase: 'reset', endsAt: now + s.settings.resetS * 1000 }, [STOP]];
+    return [{ ...s, phase: 'reset', startedAt: now, endsAt: until(now, s.settings.resetS) }, [STOP]];
   }
   if (s.phase === 'reset') {
-    const r: Session = { ...s, phase: 'recording', episode: s.episode + 1, endsAt: now + s.settings.episodeS * 1000 };
+    const r: Session = {
+      ...s,
+      phase: 'recording',
+      episode: s.episode + 1,
+      startedAt: now,
+      endsAt: until(now, s.settings.episodeS),
+    };
     return [r, [startCapture(r)]];
   }
   return [s, []];
@@ -49,6 +59,10 @@ export function stop(s: Session): Step {
 
 export function remainingMs(s: Session, now: number): number {
   return s.phase === 'done' ? 0 : Math.max(0, s.endsAt - now);
+}
+
+export function elapsedMs(s: Session, now: number): number {
+  return Math.max(0, now - s.startedAt);
 }
 
 // Helpers for reading viam:capture-control:capture-control-sensor Readings().

@@ -75,3 +75,27 @@ test('controller readings helpers', () => {
   assert.equal(cap.hasOpenSequence(r), false);
   assert.equal(cap.hasOpenSequence({ ...r, sequences: [{ resources: [], sequence_tags: [] }] }), true);
 });
+
+test('open-ended episode (episodeS null) runs until next(); reset stays timed', () => {
+  const open: cap.Settings = { ...settings, episodeS: null };
+  let [s] = cap.start(open, 'abc', 0);
+  let cmds: cap.Command[];
+
+  [s, cmds] = cap.tick(s, 1e9);
+  assert.deepEqual(cmds, []);
+  assert.equal(s.phase, 'recording');
+  assert.equal(cap.remainingMs(s, 1e9), Infinity);
+  assert.equal(cap.elapsedMs(s, 7_000), 7_000);
+
+  [s, cmds] = cap.next(s, 8_000);
+  assert.deepEqual(cmds, [STOP]);
+  assert.equal(s.phase, 'reset');
+  assert.equal(cap.remainingMs(s, 8_000), 5_000);
+  assert.equal(cap.elapsedMs(s, 9_000), 1_000);
+
+  [s, cmds] = cap.tick(s, 13_000);
+  assert.deepEqual(cmds, [START]);
+  assert.equal(s.phase, 'recording');
+  assert.equal(s.episode, 2);
+  assert.equal(cap.remainingMs(s, 13_000), Infinity);
+});
