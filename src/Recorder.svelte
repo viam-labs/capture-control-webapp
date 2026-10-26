@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { GenericServiceClient, MachineConnectionEvent, SensorClient } from '@viamrobotics/sdk';
+  import { GenericServiceClient, MachineConnectionEvent, SensorClient, SwitchClient } from '@viamrobotics/sdk';
   import { useConnectionStatus, useResourceNames, useRobotClient } from '@viamrobotics/svelte-sdk';
   import * as cap from './capture.ts';
   import * as rb from './robot.ts';
@@ -13,6 +13,7 @@
   const sensors = useResourceNames(() => partID, 'sensor');
   const cameras = useResourceNames(() => partID, 'camera');
   const generics = useResourceNames(() => partID, 'generic');
+  const switches = useResourceNames(() => partID, 'switch');
 
   function load<T>(key: string, fallback: T): T {
     try {
@@ -58,12 +59,21 @@
   // Re-runs teleop discovery while none is found: no teleop means no teleop-off gate, so a slow start must not stick.
   let discoverTick = $state(0);
 
+  let savers = $state<string[]>([]);
+  let homeSet = $state<string[]>(load('homeSet', []));
+  let homing = $state(false);
+  let homeRequested = false;
+  $effect(() => save('homeSet', $state.snapshot(homeSet)));
+
   // The command driver's request flags (see onMount).
   let busy = false;
   let advanceRequested = false;
   let stopRequested = false;
 
   const connected = $derived(status.current === MachineConnectionEvent.CONNECTED);
+  const homeSavers = $derived(homeSet.filter((n) => savers.includes(n)));
+  // With several teleop services we can't stop "the" teleop before moving, so Home is unavailable.
+  const canHome = $derived(connected && homeSavers.length > 0 && teleops.length <= 1 && session?.phase !== 'recording' && !homing);
   const controller = $derived(controllers.find((c) => c.name === controllerName));
   const sensor = $derived(robot.current && controllerName ? new SensorClient(robot.current, controllerName) : undefined);
   // Exactly one teleop service is used automatically; with none or several, T is disabled.
@@ -123,6 +133,23 @@
     ).then((found) => (teleops = found.filter((n) => n !== undefined)));
   });
 
+  // Discover arm-position-saver switches by their position labels.
+  $effect(() => {
+    const client = robot.current;
+    const names = switches.current.map((r) => r.name);
+    if (!client || !connected || !switches.query?.isSuccess) return;
+    Promise.all(
+      names.map(async (name) => {
+        try {
+          const [, labels] = await new SwitchClient(client, name).getNumberOfPositions();
+          return rb.isSaver(labels) ? name : undefined;
+        } catch {
+          return undefined;
+        }
+      }),
+    ).then((found) => (savers = found.filter((n) => n !== undefined)));
+  });
+
   // Orphan check: the sensor has no watchdog, so a closed tab can leave capture running.
   // Re-runs on controller change, reconnect, and whenever a session ends.
   $effect(() => {
@@ -148,7 +175,7 @@
     let last: unknown;
     for (let i = 0; i < 3; i++) {
       try {
-        return await sensor.doCommand(cmd);
+        return await rb.withTimeout(sensor.doCommand(cmd), rb.TELEOP_TIMEOUT_MS, 'Capture command');
       } catch (e) {
         last = e;
         await new Promise((r) => setTimeout(r, 300));
@@ -203,10 +230,32 @@
     }
   }
 
+  // Runs only from the driver with busy set, so a reset timer that expires mid-move waits.
+  async function doHome() {
+    const client = robot.current;
+    if (!client || !canHome) return;
+    busy = homing = true;
+    pollSeq++;
+    try {
+      await rb.home(
+        teleop,
+        homeSavers.map((name) => ({ name, setPosition: (p: number) => new SwitchClient(client, name).setPosition(p) })),
+      );
+      if (teleop) teleopStatus = { running: false, last_error: '' };
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      // Teleop is off (or unknown): the operator starts the next episode deliberately with Space.
+      if (session?.phase === 'reset') session = cap.hold(session);
+      pollSeq++;
+      busy = homing = false;
+    }
+  }
+
   function startSession() {
     if (busy || !canStart) return;
     error = '';
-    advanceRequested = stopRequested = teleopRequested = false; // drop keys pressed during a previous session
+    advanceRequested = stopRequested = teleopRequested = homeRequested = false; // drop keys pressed during a previous session
     const snapshot = $state.snapshot(settings);
     save('settings', snapshot);
     apply(cap.start(snapshot, activeTask, crypto.randomUUID().slice(0, 8), Date.now()));
@@ -239,7 +288,9 @@
     if (/^[1-9]$/.test(e.key)) {
       selectTask(Number(e.key) - 1);
     } else if (e.key === 't' || e.key === 'T') {
-      if (teleop) teleopRequested = true;
+      if (teleop && !homing) teleopRequested = true;
+    } else if (e.key === 'h' || e.key === 'H') {
+      if (canHome) homeRequested = true;
     } else if (e.key === 'Enter' && !active && !(e.target instanceof Element && e.target.closest('button, summary, a'))) {
       formEl?.requestSubmit();
     } else if (active && e.code === 'Space') {
@@ -262,6 +313,9 @@
       } else if (teleopRequested) {
         teleopRequested = false;
         await toggleTeleop();
+      } else if (homeRequested) {
+        homeRequested = false;
+        await doHome();
       } else if (live && advanceRequested) {
         advanceRequested = false;
         await apply(cap.next(live, now, activeTask));
@@ -342,13 +396,23 @@
 
   {#snippet robotControls()}
     <div class="robot">
-      <button type="button" class="pill {teleopMode}" disabled={!teleop} onclick={(e) => { teleopRequested = true; e.currentTarget.blur(); }} title={teleopStatus?.last_error || teleops[0] || ''}>
+      <button type="button" class="pill {teleopMode}" disabled={!teleop || homing} onclick={(e) => { teleopRequested = true; e.currentTarget.blur(); }} title={teleopStatus?.last_error || teleops[0] || ''}>
         <span class="dot"></span>Teleop {teleopMode} <kbd>T</kbd>
       </button>
       {#if teleops.length > 1}
         <small class="hint">{teleops.length} teleop services found; T needs exactly one.</small>
       {:else if !teleop}
         <small class="hint">No devrel:so101:teleop service found.</small>
+      {/if}
+      <button type="button" class="pill" disabled={!canHome} onclick={(e) => { homeRequested = true; e.currentTarget.blur(); }} title={homeSavers.join(', ')}>
+        {homing ? 'Homing…' : 'Home'} <kbd>H</kbd>
+      </button>
+      {#if teleops.length > 1}
+        <small class="hint">Home needs at most one teleop service.</small>
+      {:else if savers.length === 0}
+        <small class="hint">No arm-position-saver switches found.</small>
+      {:else if homeSavers.length === 0}
+        <small class="hint">Pick a home set in Robot setup.</small>
       {/if}
     </div>
   {/snippet}
@@ -362,6 +426,7 @@
     {#if session && active}
       <div class="badge" aria-hidden="true">{LABELS[session.phase]} {clock}</div>
     {/if}
+    {#if homing}<div class="homing" aria-live="polite">Homing {homeSavers.join(', ')}…</div>{/if}
   </section>
 
   <section class="drawer">
@@ -422,6 +487,17 @@
         <label>FPS <input type="number" min="0.1" step="any" required bind:value={settings.fps} /></label>
         <button type="submit" disabled={!canStart}>Start session</button>
       </form>
+      <details class="setup">
+        <summary>Robot setup: home set {homeSavers.length} of {savers.length}</summary>
+        <fieldset>
+          <legend>Home set (arm-position-saver switches). Home stops teleop, moves these, and leaves teleop off.</legend>
+          {#each savers as n (n)}
+            <label class="check"><input type="checkbox" value={n} bind:group={homeSet} /> {n}</label>
+          {:else}
+            <small>No <code>erh:vmodutils:arm-position-saver</code> switches found.</small>
+          {/each}
+        </fieldset>
+      </details>
     {/if}
   </section>
 </main>
@@ -466,6 +542,14 @@
   .pill.on .dot { background: var(--done); }
   .pill.error .dot { background: var(--rec); }
   .pill kbd, .hint { font-size: 12px; color: var(--muted); }
+
+  .homing { position: absolute; inset: 0; display: grid; place-items: center; background: rgba(0, 0, 0, 0.45); color: #fff; font-weight: 600; }
+  .setup { font-size: 13px; }
+  .setup summary { cursor: pointer; color: var(--muted); }
+  .setup fieldset { border: 0; margin: 0; padding: 8px 0 0; display: grid; gap: 4px; }
+  .setup legend { color: var(--muted); padding: 0 0 4px; }
+  label.check { display: flex; flex: none; gap: 6px; align-items: center; color: inherit; }
+  label.check input { width: auto; }
 
   .status { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px; }
   .status strong { font-size: 20px; }
