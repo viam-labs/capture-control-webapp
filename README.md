@@ -30,6 +30,26 @@ For full documentation, see [Viam Apps](https://docs.viam.com/build-apps/hosting
 
 Each episode becomes one Viam sequence tagged `task:<task>`, `session:<id>`, `fps:<fps>`. Nothing is captured between episodes.
 
+3. Optional, for teleop and home resets:
+   - A `devrel:so101:teleop` generic service. The app uses it automatically if there's exactly one. Keep `manage_leader_torque` at its default (`true`).
+   - One `erh:vmodutils:arm-position-saver` switch per arm, for example `leader-home` and `follower-home`. Choose the home set under **Robot setup**.
+
+**H** stops teleop and moves each arm in the home set to its saved pose. Teleop stays off afterwards; press **T** once your hand is on the leader. While teleop is off, a reset doesn't start the next episode on its own; it waits for **Space**.
+
+### Keyboard
+
+| Key | Action |
+|---|---|
+| Space | End episode / start next episode |
+| Esc | Stop session |
+| 1–9 | Pick task for the next episode |
+| T | Toggle teleop (while recording: stop teleop and end the episode) |
+| H | Home arms (not while recording) |
+| Enter | Start session |
+| ? | Shortcut overlay |
+
+Tasks are saved in the browser. Each episode is tagged `task:<the task active when it started>`.
+
 ## Develop
 
 Requires Go and Node 22.18+ (tests use Node's built-in TypeScript support).

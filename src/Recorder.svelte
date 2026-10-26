@@ -63,6 +63,7 @@
   let homeSet = $state<string[]>(([] as unknown[]).concat(load('homeSet', []))
     .filter((x): x is string => typeof x === 'string'));
   let homing = $state(false);
+  let showKeys = $state(false);
   let homeRequested = false;
   $effect(() => save('homeSet', $state.snapshot(homeSet)));
 
@@ -287,7 +288,11 @@
   function onKey(e: KeyboardEvent) {
     if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
     if (e.target instanceof Element && e.target.closest('input, select, textarea')) return;
-    if (/^[1-9]$/.test(e.key)) {
+    if (e.key === '?') {
+      showKeys = !showKeys;
+    } else if (e.key === 'Escape' && showKeys) {
+      showKeys = false;
+    } else if (/^[1-9]$/.test(e.key)) {
       selectTask(Number(e.key) - 1);
     } else if (e.key === 't' || e.key === 'T') {
       if (teleop && !homing) teleopRequested = true;
@@ -457,7 +462,10 @@
         <span class="clock">{clock}</span>
         {#if session.phase === 'reset' && !Number.isFinite(cap.remainingMs(session, now))}<span>held, press space to start</span>{/if}
         <span>Episode {session.episode} / {session.settings.episodes} · task:{session.episodeTask}</span>
-        <small>space: {session.phase === 'recording' ? 'end episode' : 'start next episode'} · esc: stop session</small>
+        <small class="hint">
+          <kbd>space</kbd> {session.phase === 'recording' ? 'end episode' : 'start next episode'} · <kbd>esc</kbd> stop session ·
+          <kbd>1–9</kbd> task · <kbd>T</kbd> teleop · <kbd>H</kbd> home · <kbd>?</kbd> shortcuts
+        </small>
       </div>
       {@render palette()}
       {@render robotControls()}
@@ -502,10 +510,31 @@
       </details>
     {/if}
   </section>
+  {#if showKeys}
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <div class="overlay" role="dialog" aria-label="Keyboard shortcuts" tabindex="-1" onclick={(e) => e.target === e.currentTarget && (showKeys = false)}>
+      <table class="keys">
+        <tbody>
+          <tr><td>Space</td><td>End episode / start next episode</td></tr>
+          <tr><td>Esc</td><td>Stop session</td></tr>
+          <tr><td>1–9</td><td>Pick task (queued while recording)</td></tr>
+          <tr><td>T</td><td>Toggle teleop. While recording: stop teleop and end the episode.</td></tr>
+          <tr><td>H</td><td>Home arms; teleop stays off (not while recording)</td></tr>
+          <tr><td>Enter</td><td>Start session</td></tr>
+          <tr><td>?</td><td>Show / hide shortcuts</td></tr>
+        </tbody>
+      </table>
+    </div>
+  {/if}
 </main>
 
 <style>
-  main { display: grid; grid-template-rows: minmax(0, 1fr) auto; height: 100dvh; }
+  main { display: grid; grid-template-rows: minmax(0, 1fr) auto; height: 100dvh; position: relative; }
+  .overlay { position: absolute; inset: 0; display: grid; place-items: center; background: rgba(0, 0, 0, 0.55); padding: 16px; }
+  .keys { background: var(--panel); border-radius: 8px; padding: 12px 16px; border-collapse: collapse; }
+  .keys td { padding: 4px 8px; border-top: 1px solid var(--border); }
+  .keys td:first-child { font-weight: 600; white-space: nowrap; }
+  .hint kbd { border: 1px solid var(--border); border-radius: 3px; padding: 0 4px; font-size: 11px; }
 
   .cams {
     position: relative; min-height: 0; padding: 8px; gap: 8px; background: #000;
