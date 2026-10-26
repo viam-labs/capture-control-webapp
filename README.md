@@ -80,7 +80,7 @@ Your app will then be available at:
 http://<machine-ip>:8888
 ```
 
-The port defaults to 8888 and can be configured via the `port` attribute in your component's config.
+The port defaults to 8888 and can be configured via the `port` attribute in the service's config.
 
 ### Offline mode
 
