@@ -1,4 +1,4 @@
-# robot-demo-capture-controller
+# capture-control-webapp
 
 A Viam app module that serves your web app from your machine via the Viam SDK.
 
@@ -58,7 +58,7 @@ make           # go test + npm test + module.tar.gz
 
 3. Access your app at:
    ```
-   https://robot-demo-capture-controller_devrel.viamapplications.com
+   https://capture-control-webapp_viam-labs.viamapplications.com
    ```
 
 **Note:** After re-uploading a new version, you may need to hard-refresh (Cmd+Shift+R / Ctrl+Shift+R) to avoid seeing a cached version.
@@ -70,8 +70,8 @@ make           # go test + npm test + module.tar.gz
 To serve your app on the local network, add the module to a machine on app.viam.com:
 
 1. Go to app.viam.com → your machine → Config
-2. Add the module by name (`devrel:robot-demo-capture-controller`)
-3. Add a component: type `generic`, model `devrel:robot-demo-capture-controller:webapp`
+2. Add the module by name (`viam-labs:capture-control-webapp`)
+3. Add a service: type `generic`, model `viam-labs:capture-control:webapp`
 4. Save config
 
 Your app will then be available at:

@@ -1,4 +1,4 @@
-module robotdemocapturecontroller
+module github.com/viam-labs/capture-control-webapp
 
 go 1.25.10
 

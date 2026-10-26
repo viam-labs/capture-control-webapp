@@ -1,13 +1,13 @@
 
 GO_BUILD_ENV :=
 GO_BUILD_FLAGS :=
-MODULE_BINARY := bin/robot-demo-capture-controller
+MODULE_BINARY := bin/capture-control-webapp
 ENTRYPOINT := dist/index.html
 
 ifeq ($(VIAM_TARGET_OS), windows)
 	GO_BUILD_ENV += GOOS=windows GOARCH=amd64
 	GO_BUILD_FLAGS := -tags no_cgo
-	MODULE_BINARY = bin/robot-demo-capture-controller.exe
+	MODULE_BINARY = bin/capture-control-webapp.exe
 endif
 
 .DEFAULT_GOAL := all
@@ -32,7 +32,7 @@ test: $(ENTRYPOINT)
 
 module.tar.gz: meta.json $(MODULE_BINARY) $(ENTRYPOINT)
 ifeq ($(VIAM_TARGET_OS), windows)
-	jq '.entrypoint = "./bin/robot-demo-capture-controller.exe"' meta.json > temp.json && mv temp.json meta.json
+	jq '.entrypoint = "./bin/capture-control-webapp.exe"' meta.json > temp.json && mv temp.json meta.json
 else
 	strip $(MODULE_BINARY)
 endif

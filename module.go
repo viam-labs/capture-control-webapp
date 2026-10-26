@@ -1,4 +1,4 @@
-package robotdemocapturecontroller
+package capturecontrolwebapp
 
 import (
 	"context"
@@ -7,9 +7,9 @@ import (
 	"net/http"
 
 	"github.com/erh/vmodutils"
-	"go.viam.com/rdk/components/generic"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/resource"
+	"go.viam.com/rdk/services/generic"
 )
 
 //go:embed dist/**
@@ -19,7 +19,7 @@ func distFS() (fs.FS, error) {
 	return fs.Sub(staticFS, "dist")
 }
 
-var Model = resource.NewModel("devrel", "robot-demo-capture-controller", "webapp")
+var Model = resource.NewModel("viam-labs", "capture-control", "webapp")
 
 type Config struct {
 	resource.TriviallyValidateConfig
@@ -28,7 +28,7 @@ type Config struct {
 }
 
 func init() {
-	resource.RegisterComponent(generic.API, Model,
+	resource.RegisterService(generic.API, Model,
 		resource.Registration[resource.Resource, *Config]{
 			Constructor: NewServer,
 		},

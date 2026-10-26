@@ -1,23 +1,23 @@
 {
   "$schema": "https://dl.viam.dev/module.schema.json",
-  "module_id": "devrel:robot-demo-capture-controller",
+  "module_id": "viam-labs:capture-control-webapp",
   "visibility": "public",
-  "url": "",
-  "description": "robot-demo-capture-controller app",
+  "url": "https://github.com/viam-labs/capture-control-webapp",
+  "description": "Web app for recording labeled robot demonstration episodes with the capture-control sensor",
   "models": [
     {
-      "api": "rdk:component:generic",
-      "model": "devrel:robot-demo-capture-controller:webapp"
+      "api": "rdk:service:generic",
+      "model": "viam-labs:capture-control:webapp"
     }
   ],
   "applications": [
     {
-      "name": "robot-demo-capture-controller",
+      "name": "capture-control-webapp",
       "type": "single_machine",
       "entrypoint": "dist/index.html"
     }
   ],
-  "entrypoint": "bin/robot-demo-capture-controller",
+  "entrypoint": "bin/capture-control-webapp",
   "first_run": "",
   "build": {
     "build": "./build.sh",
