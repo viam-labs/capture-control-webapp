@@ -45,10 +45,10 @@ export async function withTimeout<T>(p: Promise<T>, ms: number, what: string): P
 export async function home(teleop: DoCommander | undefined, savers: Saver[], moveTimeoutMs = MOVE_TIMEOUT_MS): Promise<void> {
   if (teleop) await withTimeout(teleop.doCommand({ command: 'stop' }), TELEOP_TIMEOUT_MS, 'Teleop stop');
   // allSettled: every arm finishes (or fails) before we report, so nothing is still moving when busy clears.
-  const results = await Promise.allSettled(savers.map((s) => withTimeout(s.setPosition(GO_TO), moveTimeoutMs, 'move')));
+  const results = await Promise.allSettled(savers.map(async (s) => withTimeout(s.setPosition(GO_TO), moveTimeoutMs, 'move')));
   const failed = savers.flatMap((s, i) => {
     const r = results[i];
     return r.status === 'rejected' ? [`${s.name} (${r.reason instanceof Error ? r.reason.message : r.reason})`] : [];
   });
-  if (failed.length) throw new Error(`Home failed: ${failed.join(', ')}. Teleop is off.`);
+  if (failed.length) throw new Error(`Home failed: ${failed.join(', ')}. Arms may still be moving${teleop ? '; teleop is off' : ''}.`);
 }
