@@ -38,7 +38,9 @@
   let orphaned = $state(false);
 
   // Saved tasks (localStorage). activeTask is what the next episode records.
-  let tasks = $state<string[]>(load('tasks', v1Task ? [v1Task] : []));
+  // Stored data may be hand-edited: keep unique strings only (the keyed each needs unique keys).
+  const storedTasks = ([] as unknown[]).concat(load('tasks', v1Task ? [v1Task] : []));
+  let tasks = $state<string[]>([...new Set(storedTasks.filter((x): x is string => typeof x === 'string'))]);
   let activeTask = $state<string>(load('activeTask', ''));
   let formEl = $state<HTMLFormElement>();
   $effect(() => save('tasks', $state.snapshot(tasks)));
@@ -164,12 +166,14 @@
   }
 
   function addTask(e: KeyboardEvent & { currentTarget: HTMLInputElement }) {
+    if (e.key === 'Escape') return e.currentTarget.blur();
     if (e.key !== 'Enter') return;
     const t = e.currentTarget.value.trim();
     if (!t) return;
     if (!tasks.includes(t)) tasks.push(t);
     activeTask = t;
     e.currentTarget.value = '';
+    e.currentTarget.blur(); // hand the keys back to the operator shortcuts
   }
 
   function onKey(e: KeyboardEvent) {
@@ -233,7 +237,14 @@
     <div class="palette" role="group" aria-label="Tasks">
       {#each tasks as t, i (t)}
         <span class="chip" class:active={t === shownTask} class:queued={queued && t === activeTask}>
-          <button type="button" onclick={() => selectTask(i)}>
+          <button
+            type="button"
+            aria-pressed={t === shownTask}
+            onclick={(e) => {
+              selectTask(i);
+              e.currentTarget.blur(); // else a later Enter/Space re-clicks this chip
+            }}
+          >
             {#if i < 9}<kbd>{i + 1}</kbd>{/if}
             {t}
             {#if session}<small>×{session.counts[t] ?? 0}</small>{/if}
