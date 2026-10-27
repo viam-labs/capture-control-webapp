@@ -50,6 +50,22 @@ Each episode becomes one Viam sequence tagged `task:<task>`, `session:<id>`, `fp
 
 Tasks are saved in the browser. Each episode is tagged `task:<the task active when it started>`.
 
+### Reviewing episodes
+
+When a session ends, **Review session** lists that session's episodes as they sync. Each episode plays its camera frames in real time. **K** tags the episode `review:keep` and **D** tags it `review:discard`. Each one then jumps to the next episode you haven't reviewed. Nothing is deleted; untagged episodes count as not reviewed.
+
+**Episodes** opens the same player for this machine's past episodes, with filters for task, session and review status.
+
+| Key | Action |
+|---|---|
+| K / D | Keep / discard, then go to the next unreviewed episode |
+| ← / → | Previous / next episode |
+| Space | Play / pause |
+| , / . | Step one frame |
+| Esc | Close review |
+
+Review reads and tags data with the machine's own credentials. A sequence can appear before all its frames have synced. Keep and Discard unlock once the frames have caught up, or once no new frames arrive for 15 s, in which case the episode is marked partial.
+
 ## Develop
 
 Requires Go and Node 22.18+ (tests use Node's built-in TypeScript support).

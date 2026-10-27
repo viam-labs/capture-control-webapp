@@ -5,6 +5,7 @@
   import * as cap from './capture.ts';
   import * as rb from './robot.ts';
   import CameraFeed from './CameraFeed.svelte';
+  import Review from './Review.svelte';
 
   let { partID }: { partID: string } = $props();
 
@@ -67,6 +68,8 @@
   let homeSet = $state<string[]>(loadStrings('homeSet', []));
   let homing = $state(false);
   let showKeys = $state(false);
+  // Episode review (spec B): replaces the cameras and drawer while open; only when no session is active.
+  let reviewing = $state<{ session?: { id: string; expected: number } } | undefined>();
   let homeRequested = false;
   $effect(() => save('homeSet', $state.snapshot(homeSet)));
 
@@ -97,6 +100,16 @@
   const shownTask = $derived(session?.phase === 'recording' ? session.episodeTask : activeTask);
   const queued = $derived(session?.phase === 'recording' && activeTask !== session.episodeTask);
   const canStart = $derived(!!sensor && !orphaned && !!activeTask && !homing);
+  const episodesDone = $derived(session ? Object.values(session.counts).reduce((a, b) => a + b, 0) : 0);
+  const canReview = $derived(connected && !!robot.current && !active && !homing);
+  // The client only goes away on a dial-config change or unmount; close review so keys and layout stay consistent.
+  $effect(() => {
+    if (!robot.current) reviewing = undefined;
+  });
+  function openReview(queue: boolean) {
+    if (!canReview) return;
+    reviewing = { session: queue && session && episodesDone > 0 ? { id: session.id, expected: episodesDone } : undefined };
+  }
 
   // Discover capture-control sensors by the shape of their readings.
   $effect(() => {
@@ -269,6 +282,7 @@
 
   function onKey(e: KeyboardEvent) {
     if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (reviewing && e.key !== 't' && e.key !== 'T') return; // Review owns the keys; T (teleop / emergency stop) still works
     if (e.target instanceof Element && e.target.closest('input, select, textarea')) return;
     if (e.key === '?') {
       showKeys = !showKeys;
@@ -360,7 +374,7 @@
 
 <svelte:window onkeydown={onKey} />
 
-<main>
+<main class:reviewing={!!reviewing}>
   {#snippet palette()}
     <div class="palette" role="group" aria-label="Tasks">
       {#each tasks as t, i (t)}
@@ -408,6 +422,23 @@
     </div>
   {/snippet}
 
+  {#snippet banners()}
+    {#if error}<p class="banner error" role="alert">{error}</p>{/if}
+    {#if orphaned}
+      <p class="banner warn" role="alert">
+        Capture is still running on <strong>{controllerName}</strong>.
+        <button onclick={(e) => { stopOrphan(); e.currentTarget.blur(); }}>Stop</button>
+      </p>
+    {/if}
+    {#if session?.phase === 'recording' && teleopMode === 'error'}
+      <p class="banner warn" role="alert">Teleop stopped itself: {teleopStatus?.last_error}. Space ends the episode.</p>
+    {/if}
+  {/snippet}
+
+  {#if reviewing && robot.current}
+    <div class="review-banners">{@render banners()}</div>
+    <Review robot={robot.current} session={reviewing.session} onclose={() => (reviewing = undefined)} />
+  {:else}
   <section class="cams {active ? session?.phase : ''}" style="--cols: {cols}">
     {#each cameraNames as name (name)}
       <CameraFeed {partID} {name} />
@@ -421,17 +452,7 @@
   </section>
 
   <section class="drawer">
-    {#if error}<p class="banner error" role="alert">{error}</p>{/if}
-    {#if orphaned}
-      <p class="banner warn" role="alert">
-        Capture is still running on <strong>{controllerName}</strong>.
-        <button onclick={stopOrphan}>Stop</button>
-      </p>
-    {/if}
-
-    {#if session?.phase === 'recording' && teleopMode === 'error'}
-      <p class="banner warn" role="alert">Teleop stopped itself: {teleopStatus?.last_error}. Space ends the episode.</p>
-    {/if}
+    {@render banners()}
 
     {#if !connected}
       <p>Connecting to machine…</p>
@@ -459,6 +480,14 @@
           <strong class="done">DONE</strong> · {session.episode} / {session.settings.episodes} episodes
         </p>
       {/if}
+      <div class="row">
+        {#if session && episodesDone > 0}
+          <button type="button" disabled={!canReview} onclick={(e) => { openReview(true); e.currentTarget.blur(); }}>
+            Review session ({episodesDone} episodes)
+          </button>
+        {/if}
+        <button type="button" disabled={!canReview} onclick={(e) => { openReview(false); e.currentTarget.blur(); }}>Episodes</button>
+      </div>
       {@render palette()}
       {@render robotControls()}
       <form
@@ -494,6 +523,7 @@
       </details>
     {/if}
   </section>
+  {/if}
   {#if showKeys}
     <!-- svelte-ignore a11y_click_events_have_key_events -->
     <div class="overlay" role="dialog" aria-label="Keyboard shortcuts" tabindex="-1" onclick={(e) => e.target === e.currentTarget && (showKeys = false)}>
@@ -514,6 +544,9 @@
 
 <style>
   main { display: grid; grid-template-rows: minmax(0, 1fr) auto; height: 100dvh; position: relative; }
+  main.reviewing { grid-template-rows: auto minmax(0, 1fr); }
+  .review-banners { display: grid; gap: 8px; padding: 0 16px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; }
   .overlay { position: absolute; inset: 0; display: grid; place-items: center; background: rgba(0, 0, 0, 0.55); padding: 16px; }
   .keys { background: var(--panel); border-radius: 8px; padding: 12px 16px; border-collapse: collapse; }
   .keys td { padding: 4px 8px; border-top: 1px solid var(--border); }
