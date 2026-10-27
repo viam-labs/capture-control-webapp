@@ -68,7 +68,7 @@ Frame times are **epoch milliseconds** (`number`) throughout.
 - `frameAt(frames, t)` returns the last frame with `time <= t`, or `undefined` before the first frame. It uses binary search.
 - `step(tl, t, dir)` returns the next (`dir = 1`) or previous (`dir = -1`) **distinct frame time across all cameras**, strictly after or before `t`. If there is none, it returns `t`.
 - `span(tl)` returns `{ start, end }`, the minimum and maximum frame times.
-- `nextUnreviewed(episodes, from)` returns the index of the next episode after `from` that is **playable** and has no `review`. It wraps around, and returns `-1` if there is none. Each episode carries `playable: boolean`, which the player sets (see below).
+- `nextUnreviewed(episodes, from)` returns the index of the next episode after `from` that is **listed** (not a "syncing…" placeholder) and has no `review`. It wraps around, and returns `-1` if there is none. Playability is not part of this. It only gates K and D on the selected episode.
 
 ### `data.ts` (thin SDK layer, not unit tested)
 
@@ -114,14 +114,16 @@ Frame times are **epoch milliseconds** (`number`) throughout.
 
 A listed sequence can still be missing frames, because JPEGs sync separately from the `.seq` file. The selected episode is **playable** in either of these cases:
 
-- Its last frame time is at least `sequence.endTime − 1 s`.
-- Its frame count hasn't changed across 3 consecutive re-fetches (15 s). The episode is then marked "partial".
+- Its last frame time is at least `endTime − 1 s`, where `endTime` is `sequence.endTime.toDate().getTime()`.
+- Its frame count is above 0 and hasn't changed across 3 consecutive re-fetches (15 s). The episode is then marked "partial".
 
-Until then:
+An episode with 0 frames is never playable.
 
-- The player re-fetches `frameIndex` every 5 s, using the same `setTimeout`-chain pattern.
-- It shows "syncing frames (x / ~expected)". The expected count is (`endTime − startTime`) × fps × number of cameras, where fps comes from the `fps:` tag, falling back to 10.
-- **K and D are disabled.**
+Until the episode is fully synced:
+
+- The player re-fetches `frameIndex` every 5 s, using the same `setTimeout`-chain pattern. The re-fetches **keep running while the episode is partial**, so a slow sync catches up on its own and the "partial" label clears. They stop once the first condition holds.
+- It shows "syncing frames (x)".
+- **K and D are disabled** until the episode is playable.
 
 **Player**
 
@@ -131,7 +133,7 @@ Until then:
 - **Loading.** Frame bytes are fetched from the playhead forward, in batches of 20, until **the whole episode is loaded**. Object URLs are created here from the returned blobs. All of them are revoked when the episode changes and on unmount.
   - `ponytail:` it keeps every frame of the episode, about 34 MB for 900 frames. If long episodes become a problem, add a window around the playhead.
 - **Scrubber.** An `<input type="range">` over the span. Behind it, a band shows which frames have loaded.
-- **Stale results.** Every async load (frame index, byte batches, re-fetches) captures `const gen = ++loadGen` and drops its result if `gen !== loadGen`. Changing the episode bumps `loadGen`. A stale batch therefore never creates object URLs, and a stale index never replaces the timeline.
+- **Stale results.** Only an episode change runs `++loadGen`. Every async load (frame index, byte batches, re-fetches) captures `const gen = loadGen` and drops its result if `gen !== loadGen`. A batch left over from a previous episode therefore never creates object URLs, and a stale index never replaces the timeline. Loads for the same episode don't cancel each other.
 
 **Keys**
 
@@ -178,7 +180,7 @@ Review owns these while it is open:
 | Read denied | The Review screen shows "This machine's key can't read captured data" with the error text. Capture is unaffected. |
 | `updateSequence` denied | Show an error banner. The row's tag doesn't change, and playback keeps working. |
 | An episode never appears | Its row stays "syncing…" while the queue is open. Polling stops on close. |
-| Frames never finish syncing | After 15 s with no new frames, the episode becomes playable and is marked "partial". |
+| Frames never finish syncing | After 15 s with no new frames (and at least one frame), the episode becomes playable and is marked "partial". Re-fetching continues, so the label clears if the rest arrives. |
 | A frame batch fails | Retry it twice. Then mark the gap on the scrubber and keep playing the frames that did load. |
 | A cloud call fails mid-review | Show a banner with **Retry**. Tags already written stay written. Cached client/ids promises are cleared, so a retry starts fresh. |
 | A tag write races a retag elsewhere | Last write wins. `setReview` re-reads the tags first, so the other tags survive. |
@@ -193,7 +195,7 @@ Review owns these while it is open:
 - `timeline` / `frameAt`: before the first frame, between frames, exactly on a frame, and past the end, with two cameras whose timestamps are offset.
 - `step`: the next and previous distinct times across the offset cameras, and the ends.
 - `span`.
-- `nextUnreviewed`: wraps around, skips episodes that aren't playable or are already reviewed, and returns `-1` when none are left.
+- `nextUnreviewed`: wraps around, skips placeholders and episodes that are already reviewed, and returns `-1` when none are left.
 
 Manual end-to-end check on pi-arm6:
 
