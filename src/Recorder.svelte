@@ -102,6 +102,10 @@
   const canStart = $derived(!!sensor && !orphaned && !!activeTask && !homing);
   const episodesDone = $derived(session ? Object.values(session.counts).reduce((a, b) => a + b, 0) : 0);
   const canReview = $derived(connected && !!robot.current && !active && !homing);
+  // The client only goes away on a dial-config change or unmount; close review so keys and layout stay consistent.
+  $effect(() => {
+    if (!robot.current) reviewing = undefined;
+  });
   function openReview(queue: boolean) {
     if (!canReview) return;
     reviewing = { session: queue && session && episodesDone > 0 ? { id: session.id, expected: episodesDone } : undefined };
@@ -423,7 +427,7 @@
     {#if orphaned}
       <p class="banner warn" role="alert">
         Capture is still running on <strong>{controllerName}</strong>.
-        <button onclick={stopOrphan}>Stop</button>
+        <button onclick={(e) => { stopOrphan(); e.currentTarget.blur(); }}>Stop</button>
       </p>
     {/if}
     {#if session?.phase === 'recording' && teleopMode === 'error'}

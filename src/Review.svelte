@@ -55,7 +55,7 @@
         const found = await data.listEpisodes({ ...(await data.ids(robot)), session: session?.id });
         if (stopped) return;
         episodes = found;
-        error = '';
+        if (error.startsWith("This machine's key")) error = ''; // don't wipe a tagging error
         if (session && found.length < session.expected) timer = setTimeout(poll, 5000);
       } catch (e) {
         if (!stopped) error = `This machine's key can't read captured data, or the request failed: ${msg(e)}`;
@@ -268,6 +268,7 @@
         {#if current}Syncing frames ({frameCount})…
         {:else if loading}Loading episodes…
         {:else if session}Waiting for this session's episodes to sync…
+        {:else if episodes.length}No episodes match these filters.
         {:else}No episodes recorded on this machine yet.{/if}
       </p>
     {/each}
@@ -330,7 +331,7 @@
       {#each rows as s, i (s?.id ?? `pending-${i}`)}
         {@const t = s && rv.parseTags(tagsOf(s))}
         <button type="button" class="ep" class:sel={i === sel} onclick={blurAfter(() => (sel = i))}>
-          <span class="n">#{session ? i + 1 : rows.length - i}</span>
+          <span class="n">#{session ? i + 1 : episodes.indexOf(s!) + 1}</span>
           <span>{t?.task ?? '…'}{#if !session && t?.session}<small> · session {t.session}</small>{/if}</span>
           <small>{s ? `${((data.ms(s.endTime) - data.ms(s.startTime)) / 1000).toFixed(1)} s` : ''}</small>
           <span class="st {t?.review ?? (s ? 'none' : 'sync')}">{t?.review ? LABEL[t.review] : s ? 'not reviewed' : '⟳ syncing…'}</span>

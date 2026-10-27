@@ -40,12 +40,9 @@ On 2026-10-26, a probe ran against pi-arm6 with an Owner-role, machine-scoped AP
 - `binaryDataByIds(ids, true)`: returns the bytes, about 38 KB per JPEG.
 - `tabularDataByFilter`
 
-Two things are still **unverified**:
+Implementation task 1 then ran the same probe with the real viamapplications.com cookie key, served through `viam module local-app-testing`. Every read passed, and so did `updateSequence`: it added `review:probe` and then restored the original tags.
 
-- **Writes.** `updateSequence` hasn't been tried.
-- **The cookie key's role.** The viamapplications.com cookie key may be an Operator key rather than an Owner key.
-
-**Implementation task 1 checks both, using the real cookie key.** If reads or writes are denied, stop and come back to the Data access decision. Don't build a proxy or a fallback without a spec.
+If a future key is denied reads or writes, stop and come back to the Data access decision. Don't build a proxy or a fallback without a spec.
 
 ## Units
 
