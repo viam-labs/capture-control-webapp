@@ -1,7 +1,7 @@
 {
   "dependencies": {
-    "@viamrobotics/sdk": "^0.76.0",
-    "@viamrobotics/svelte-sdk": "^1.5.3"
+    "@viamrobotics/sdk": "^0.78.0",
+    "@viamrobotics/svelte-sdk": "^1.5.4"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7.3.1",
