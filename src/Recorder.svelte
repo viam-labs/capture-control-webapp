@@ -256,7 +256,7 @@
     advanceRequested = stopRequested = teleopRequested = homeRequested = false; // drop keys pressed during a previous session
     const snapshot = $state.snapshot(settings);
     save('settings', snapshot);
-    apply(cap.start(snapshot, activeTask, crypto.randomUUID().slice(0, 8), Date.now()));
+    apply(cap.start(snapshot, activeTask, crypto.getRandomValues(new Uint32Array(1))[0].toString(16).padStart(8, '0'), Date.now()));
   }
 
   function stopOrphan() {
