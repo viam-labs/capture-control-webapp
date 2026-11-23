@@ -138,11 +138,12 @@
 
   onMount(() => {
     // Status poll: next poll starts after the previous one settles.
+    let alive = true; // loop must not reschedule after unmount
     let poll: ReturnType<typeof setTimeout>;
     const loop = async () => {
       now = Date.now();
       await refresh();
-      poll = setTimeout(loop, 500);
+      if (alive) poll = setTimeout(loop, 500);
     };
     void loop();
     // Heartbeat ticks come from a worker: browsers throttle main-thread timers in background tabs.
@@ -163,6 +164,7 @@
     const bye = () => { if (st?.episode) client.doCommand({ command: 'stop' }).catch(() => {}); };
     addEventListener('pagehide', bye);
     return () => {
+      alive = false;
       clearTimeout(poll);
       worker?.terminate();
       clearInterval(fallback);
