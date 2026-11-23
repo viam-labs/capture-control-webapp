@@ -1,14 +1,16 @@
 <script lang="ts">
   import { onDestroy, untrack } from 'svelte';
-  import type { RobotClient, Sequence } from '@viamrobotics/sdk';
+  import { GenericServiceClient, type RobotClient, type Sequence } from '@viamrobotics/sdk';
   import * as rv from './review.ts';
   import * as data from './data.ts';
+  import * as rn from './runner.ts';
+  import * as rb from './robot.ts';
 
   let {
     robot,
     session,
     onclose,
-  }: { robot: RobotClient; session?: { id: string; expected: number }; onclose: () => void } = $props();
+  }: { robot: RobotClient; session?: { id: string; expected: number; runner?: string }; onclose: () => void } = $props();
 
   const msg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -19,7 +21,7 @@
   let error = $state('');
   let retry = $state(0);
   let sel = $state(0);
-  let filter = $state({ task: '', session: '', review: '' });
+  let filter = $state({ task: '', session: '', review: '', source: '', outcome: '' });
 
   const tagsOf = (s: Sequence) => localTags[s.id] ?? s.sequenceTags;
 
@@ -31,6 +33,8 @@
       return (
         (!filter.task || t.task === filter.task) &&
         (!filter.session || t.session === filter.session) &&
+        (!filter.source || t.source === filter.source) &&
+        (!filter.outcome || t.outcome === filter.outcome) &&
         (!filter.review || (filter.review === 'none' ? !t.review : t.review === filter.review))
       );
     });
@@ -68,6 +72,44 @@
       stopped = true;
       clearTimeout(timer);
     };
+  });
+
+  // ---- Outcome tags from the runner's log ----
+  let segs = $state.raw<rn.Segment[] | undefined>();
+  let applying = false;
+  let tagRetries = 0;
+  $effect(() => {
+    retry;
+    const r = session?.runner;
+    if (!r) return;
+    let stopped = false;
+    rb.withTimeout(new GenericServiceClient(robot, r).doCommand({ command: 'log', session: session!.id }), rb.CALL_TIMEOUT_MS, 'Runner log')
+      .then((x) => { if (!stopped) segs = (x as { segments?: rn.Segment[] }).segments ?? []; })
+      .catch((e) => { if (!stopped) error = `Couldn't read the runner log, outcomes won't be tagged: ${msg(e)}`; });
+    return () => { stopped = true; };
+  });
+  $effect(() => {
+    const log = segs;
+    const eps = episodes;
+    if (!log || applying) return;
+    const todo = untrack(() => rn.pendingOutcomes(eps.map((s) => ({ id: s.id, tags: tagsOf(s) })), log));
+    if (!todo.length) return;
+    applying = true;
+    let ok = true;
+    (async () => {
+      for (const { id, outcome } of todo) {
+        try {
+          const tags = await data.setOutcome(id, outcome);
+          tagRetries = 0;
+          localTags = { ...localTags, [id]: tags };
+        } catch (e) {
+          error = `Outcome tagging failed: ${msg(e)}`;
+          ok = false; // no immediate retry loop; retry every 5 s, up to 1 min (the queue's own re-poll stops once all expected episodes are listed)
+          if (tagRetries++ < 12) setTimeout(() => { episodes = [...episodes]; }, 5000);
+          break;
+        }
+      }
+    })().finally(() => { applying = false; if (ok) episodes = [...episodes]; }); // re-run for episodes that synced meanwhile
   });
 
   // ---- Player ----
@@ -323,6 +365,15 @@
           <option value="keep">Keep</option>
           <option value="discard">Discard</option>
         </select>
+        <select aria-label="Source" bind:value={filter.source} onchange={(e) => { sel = 0; e.currentTarget.blur(); }}>
+          <option value="">Any source</option>
+          <option value="policy">Policy</option>
+          <option value="correction">Correction</option>
+        </select>
+        <select aria-label="Outcome" bind:value={filter.outcome} onchange={(e) => { sel = 0; e.currentTarget.blur(); }}>
+          <option value="">Any outcome</option>
+          {#each ['success', 'failure', 'takeover', 'error', 'stopped'] as o (o)}<option>{o}</option>{/each}
+        </select>
       {/if}
       <button type="button" class="close" onclick={blurAfter(onclose)}>Close <kbd>esc</kbd></button>
     </div>
@@ -334,6 +385,7 @@
           <span class="n">#{session ? i + 1 : episodes.indexOf(s!) + 1}</span>
           <span>{t?.task ?? '…'}{#if !session && t?.session}<small> · session {t.session}</small>{/if}</span>
           <small>{s ? `${((data.ms(s.endTime) - data.ms(s.startTime)) / 1000).toFixed(1)} s` : ''}</small>
+          <small>{t?.outcome ?? ''}</small>
           <span class="st {t?.review ?? (s ? 'none' : 'sync')}">{t?.review ? LABEL[t.review] : s ? 'not reviewed' : '⟳ syncing…'}</span>
         </button>
       {/each}
@@ -370,7 +422,7 @@
   .close { margin-left: auto; }
   .eps { display: grid; gap: 4px; max-height: 30vh; overflow-y: auto; }
   .ep {
-    display: grid; grid-template-columns: 4ch minmax(0, 1fr) auto auto; gap: 12px; align-items: center;
+    display: grid; grid-template-columns: 4ch minmax(0, 1fr) auto auto auto; gap: 12px; align-items: center;
     padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px; background: none; text-align: left; cursor: pointer; font: inherit; color: inherit;
   }
   .ep.sel { border-color: currentColor; font-weight: 600; }

@@ -3,6 +3,7 @@
 import { createViamClient, type Credentials, type RobotClient, type Sequence, type ViamClient } from '@viamrobotics/sdk';
 import { getHostAndCredentials } from './auth.js';
 import { withReview, type Frame, type Review } from './review.ts';
+import { withOutcome, type Outcome } from './runner.ts';
 
 export type Ids = { orgId: string; partId: string };
 
@@ -74,10 +75,21 @@ export async function frameBytes(frames: Frame[]): Promise<Map<string, Blob>> {
   return out;
 }
 
-/** Swaps the sequence's review tag. Re-reads first so tags changed elsewhere survive; returns the tags written. */
-export async function setReview(seqId: string, state: Review): Promise<string[]> {
-  const data = (await client()).dataClient;
-  const tags = withReview((await data.getSequence(seqId)).sequenceTags, state);
-  await data.updateSequence(seqId, undefined, tags, undefined, undefined, { paths: ['sequence_tags'] });
-  return tags;
+// All tag writes run one at a time: each re-reads the tags, so concurrent writers can't clobber each other.
+let tagChain: Promise<unknown> = Promise.resolve();
+function editTags(seqId: string, f: (tags: string[]) => string[]): Promise<string[]> {
+  const p = tagChain.then(async () => {
+    const data = (await client()).dataClient;
+    const tags = f((await data.getSequence(seqId)).sequenceTags);
+    await data.updateSequence(seqId, undefined, tags, undefined, undefined, { paths: ['sequence_tags'] });
+    return tags;
+  });
+  tagChain = p.catch(() => {});
+  return p;
 }
+
+/** Swaps the sequence's review tag; returns the tags written. */
+export const setReview = (seqId: string, state: Review): Promise<string[]> => editTags(seqId, (t) => withReview(t, state));
+
+/** Same as setReview, for the outcome tag. */
+export const setOutcome = (seqId: string, outcome: Outcome): Promise<string[]> => editTags(seqId, (t) => withOutcome(t, outcome));

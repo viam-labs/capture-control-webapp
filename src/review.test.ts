@@ -11,8 +11,18 @@ test('parseTags reads task, session and review', () => {
     task: 'pick up the pen',
     session: 'abc',
     review: 'keep',
+    source: undefined,
+    outcome: undefined,
+    episode: undefined,
   });
-  assert.deepEqual(rv.parseTags(['task:x', 'review:maybe']), { task: 'x', session: undefined, review: undefined });
+  assert.equal(rv.parseTags(['task:x', 'review:maybe']).review, undefined);
+});
+
+test('parseTags reads runner source, outcome and episode', () => {
+  const p = rv.parseTags(['source:correction', 'outcome:takeover', 'episode:7', 'outcome:bogus']);
+  assert.deepEqual([p.source, p.outcome, p.episode], ['correction', 'takeover', 7]);
+  const q = rv.parseTags(['source:other', 'outcome:bogus', 'episode:x']);
+  assert.deepEqual([q.source, q.outcome, q.episode], [undefined, undefined, undefined]);
 });
 
 test('withReview replaces any earlier review tag and keeps the others in order', () => {
