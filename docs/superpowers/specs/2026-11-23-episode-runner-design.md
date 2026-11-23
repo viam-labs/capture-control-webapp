@@ -133,7 +133,10 @@ any ──stop / heartbeat lost / executor error / dependency timeout──► i
 - **label (correction)**: `teleop.stop`, `stop_capture`, log the correction's outcome.
 - Every dependency call is bounded by `call_timeout_ms`, except `executor.stop` and the wait after it, which use
   `executor_stop_timeout_ms`. vla:controller's stop cancels its loop, closes its stream (up to 5 s) and stops the arm,
-  so it can exceed 5 s.
+  so it can exceed 5 s. An executor `stop` is never cut short: it is sent on a context that operator `stop` and
+  operation cancellation cannot cancel (cancelling a DoCommand cancels the module's handler mid-stop, skipping
+  `arm.stop()`); cancellation may interrupt only the status wait that follows it. The runner enters `starting` before
+  sending `executor.start`, so a cancelled or timed-out start is always followed by an executor `stop`.
 
 ## Labels and the session log
 
