@@ -318,9 +318,61 @@ func (e *engine) abort(outcome, msg string) {
 }
 
 func (e *engine) takeOver(ctx context.Context) error {
+	e.opMu.Lock()
+	defer e.opMu.Unlock()
+	ctx, done := e.beginOp(ctx)
+	defer done()
 	e.mu.Lock()
-	defer e.mu.Unlock()
-	return fmt.Errorf("take_over not allowed in %s", e.phase)
+	ph := e.phase
+	e.mu.Unlock()
+	if ph != phasePolicy {
+		return fmt.Errorf("take_over not allowed in %s", ph)
+	}
+	if e.teleop == nil || !e.safeTakeover {
+		return errors.New("take_over refused: needs a teleop dependency and teleop_safe_takeover: true")
+	}
+	if err := e.stopExecutorAndWait(ctx); err != nil {
+		e.abort("error", "stop executor: "+err.Error())
+		return err
+	}
+	if _, err := call(ctx, e.capture, map[string]interface{}{"stop_capture": true}, e.timings.call); err != nil {
+		e.abort("error", "stop capture: "+err.Error())
+		return err
+	}
+	e.mu.Lock()
+	e.capturing = false
+	e.finish("takeover", "")
+	sess := *e.sess
+	e.seg = &segment{Session: sess.ID, Episode: sess.Episodes, Source: "correction",
+		Task: sess.Task, Checkpoint: sess.Checkpoint}
+	e.mu.Unlock()
+
+	_, err := call(ctx, e.capture, map[string]interface{}{
+		"start_capture": true, "frequency_hz": sess.FPS,
+		"tags": []string{"task:" + sess.Task, "session:" + sess.ID, fmt.Sprintf("episode:%d", sess.Episodes),
+			"source:correction", "checkpoint:" + sess.Checkpoint, fmt.Sprintf("fps:%g", sess.FPS)},
+	}, e.timings.call)
+	if err != nil {
+		e.abort("error", "start correction capture: "+err.Error())
+		return err
+	}
+	e.mu.Lock()
+	e.capturing, e.seg.TStart = true, e.now()
+	e.mu.Unlock()
+	if err := e.sleep(ctx, e.timings.hold); err != nil {
+		e.abort("error", "hold: "+err.Error())
+		return err
+	}
+	// Enter correction before teleop starts so abort stops teleop if start half-succeeds.
+	e.mu.Lock()
+	e.phase = phaseCorrection
+	e.mu.Unlock()
+	if _, err := call(ctx, e.teleop, map[string]interface{}{"command": "start"}, e.timings.call); err != nil {
+		e.abort("error", "start teleop: "+err.Error())
+		return err
+	}
+	e.heartbeat()
+	return nil
 }
 
 func (e *engine) label(ctx context.Context, outcome string) error {
@@ -331,13 +383,18 @@ func (e *engine) label(ctx context.Context, outcome string) error {
 	e.mu.Lock()
 	ph := e.phase
 	e.mu.Unlock()
-	if ph != phasePolicy {
+	if ph != phasePolicy && ph != phaseCorrection {
 		return fmt.Errorf("label not allowed in %s", ph)
 	}
 	if outcome != "success" && outcome != "failure" {
 		return fmt.Errorf("label outcome must be success or failure, got %q", outcome)
 	}
-	if err := e.stopExecutorAndWait(ctx); err != nil {
+	if ph == phaseCorrection {
+		if _, err := call(ctx, e.teleop, map[string]interface{}{"command": "stop"}, e.timings.call); err != nil {
+			e.abort("error", "stop teleop: "+err.Error())
+			return err
+		}
+	} else if err := e.stopExecutorAndWait(ctx); err != nil {
 		e.abort("error", "stop executor: "+err.Error())
 		return err
 	}

@@ -402,3 +402,68 @@ func TestStatusFailingPastStartTimeoutAborts(t *testing.T) {
 		t.Fatalf("status %v", r.e.status())
 	}
 }
+
+func TestTakeoverOrder(t *testing.T) {
+	r := newRig(t, true)
+	ctx := context.Background()
+	inPolicy(t, r)
+	if err := r.e.takeOver(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.exec.names(); got[len(got)-1] != "stop" {
+		t.Fatalf("executor %v", got)
+	}
+	if got := r.capture.names(); len(got) != 3 || got[1] != "stop_capture" || got[2] != "start_capture" {
+		t.Fatalf("capture %v", got)
+	}
+	tags := r.capture.calls()[2]["tags"].([]string)
+	if tags[2] != "episode:1" || tags[3] != "source:correction" {
+		t.Fatalf("correction tags %v", tags)
+	}
+	r.sleptMu.Lock()
+	slept := append([]time.Duration(nil), r.slept...)
+	r.sleptMu.Unlock()
+	if len(slept) == 0 || slept[len(slept)-1] != 500*time.Millisecond {
+		t.Fatalf("hold %v", slept)
+	}
+	if got := r.teleop.names(); len(got) != 1 || got[0] != "start" {
+		t.Fatalf("teleop %v", got)
+	}
+	if r.e.status()["state"] != "correction" {
+		t.Fatal("state must be correction")
+	}
+	if err := r.e.label(ctx, "success"); err != nil {
+		t.Fatal(err)
+	}
+	segs, _ := readSegments(r.e.logDir, "s1")
+	if len(segs) != 2 || segs[0].Outcome != "takeover" || segs[1].Source != "correction" || segs[1].Outcome != "success" {
+		t.Fatalf("log %v", segs)
+	}
+	if got := r.teleop.names(); got[len(got)-1] != "stop" {
+		t.Fatalf("teleop %v", got)
+	}
+	if r.e.status()["state"] != "idle" {
+		t.Fatal("label must end the correction")
+	}
+}
+
+func refusedTakeover(t *testing.T, r *rig) {
+	t.Helper()
+	inPolicy(t, r)
+	if err := r.e.takeOver(context.Background()); err == nil {
+		t.Fatal("take_over must be refused")
+	}
+	if r.e.status()["state"] != "policy" || len(r.teleop.names()) != 0 {
+		t.Fatal("a refused take_over must change nothing")
+	}
+}
+
+func TestTakeoverRefusedWithoutSafeTeleop(t *testing.T) {
+	refusedTakeover(t, newRig(t, false))
+}
+
+func TestTakeoverRefusedWithoutTeleop(t *testing.T) {
+	r := newRig(t, true)
+	r.e.teleop = nil
+	refusedTakeover(t, r)
+}
