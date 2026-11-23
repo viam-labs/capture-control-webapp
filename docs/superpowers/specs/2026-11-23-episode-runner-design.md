@@ -43,10 +43,12 @@ during a policy session; the web app is its operator UI.
     "status_timeout_ms": 1000,
     "executor_stop_timeout_ms": 15000,
     "policy_start_timeout_ms": 120000,
-    "teleop_safe_takeover": true
+    "teleop_safe_takeover": false
   }
 }
 ```
+
+`teleop_safe_takeover` is set `true` only for a teleop device that passed the pose check (SO-101: pending verification).
 
 `executor` and `capture_sensor` are required dependencies; `teleop` is optional. Without it `take_over` is refused,
 and policy episodes and labels still work.

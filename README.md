@@ -85,21 +85,21 @@ The second model in this module, `viam-labs:capture-control:episode-runner`, run
     "status_timeout_ms": 1000,
     "executor_stop_timeout_ms": 15000,
     "policy_start_timeout_ms": 120000,
-    "teleop_safe_takeover": true
+    "teleop_safe_takeover": false
   }
 }
 ```
 
 `executor` and `capture_sensor` are required dependencies; `teleop` is optional (without it `take_over` is refused; episodes and labels still work). `status_timeout_ms` bounds each executor status read; 3 consecutive failed reads stop everything.
 
-**`teleop_safe_takeover` defaults to `false`.** Teleop must start from the follower's current pose (no jump to the leader). Until you set it `true` for a teleop device that passed that pose check, `take_over` is refused. Result for `devrel:so101:teleop`: pending verification.
+**`teleop_safe_takeover` defaults to `false`.** Teleop must start from the follower's current pose (no jump to the leader). Until you set it `true` for a teleop device that passed that pose check, `take_over` is refused. Set it `true` only for a device that passed the pose check. Result for `devrel:so101:teleop`: pending verification.
 
 ### Dependency contracts
 
 | Role | Command | Reply the runner reads |
 |---|---|---|
 | Executor (`viam-labs:vla:controller`) | `{"command":"start","task":"<text>"}`, `{"command":"stop"}`, `{"command":"status"}` | `state` (`waiting_for_policy`, `running`, `error`, `stopped`, `idle`), `last_error` |
-| Teleop (`devrel:so101:teleop`) | `{"command":"start"}`, `{"command":"stop"}`, `{"command":"status"}` | `running` (bool), `last_error` |
+| Teleop (`devrel:so101:teleop`) | `{"command":"start"}`, `{"command":"stop"}` | none; `status` is not used by the runner (the web app reads it) |
 | Capture (`viam:capture-control:capture-control-sensor`) | `{"start_capture":true,"frequency_hz":<fps>,"tags":[...]}`, `{"stop_capture":true}` | none |
 
 Only the executor's `state` decides failure: `last_error` while `running` is logged, not acted on.
@@ -113,6 +113,7 @@ Only the executor's `state` decides failure: `last_error` while `running` is log
 | T | Take over (policy state only) |
 | H | Home (runner idle only) |
 | Esc | Stop |
+| ? | Show the shortcut overlay |
 
 ### Tags and the session log
 

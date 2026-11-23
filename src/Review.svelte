@@ -104,7 +104,7 @@
           localTags = { ...localTags, [id]: tags };
         } catch (e) {
           error = `Outcome tagging failed: ${msg(e)}`;
-          ok = false; // no auto-retry loop; Retry restarts the poll
+          ok = false; // no immediate retry loop: the queue re-polls every 5 s until all expected episodes are listed, which retries tagging
           break;
         }
       }
