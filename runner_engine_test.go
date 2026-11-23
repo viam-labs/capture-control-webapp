@@ -23,8 +23,10 @@ func cmdName(cmd map[string]interface{}) string {
 	if c, ok := cmd["command"].(string); ok {
 		return c
 	}
-	for k := range cmd {
-		return k // start_capture / stop_capture
+	for _, k := range []string{"start_capture", "stop_capture"} {
+		if _, ok := cmd[k]; ok {
+			return k
+		}
 	}
 	return ""
 }
@@ -275,5 +277,128 @@ func TestExecutorErrorDuringStartingAborts(t *testing.T) {
 	r.e.tick(ctx)
 	if r.e.status()["state"] != "idle" || len(r.capture.names()) != 0 {
 		t.Fatal("an executor error while starting must abort without capturing")
+	}
+}
+
+func inPolicy(t *testing.T, r *rig) {
+	t.Helper()
+	startedSession(t, r)
+	if err := r.e.startEpisode(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	r.exec.set("running")
+	r.clock.advance(250 * time.Millisecond)
+	r.e.tick(context.Background())
+	if r.e.status()["state"] != "policy" {
+		t.Fatal("not in policy")
+	}
+}
+
+func lastOutcome(t *testing.T, r *rig) string {
+	t.Helper()
+	segs, _ := readSegments(r.e.logDir, "s1")
+	if len(segs) == 0 {
+		t.Fatal("no segments")
+	}
+	return segs[len(segs)-1].Outcome
+}
+
+func TestCaptureStartFailureAborts(t *testing.T) {
+	r := newRig(t, true)
+	r.capture.failOn = "start_capture"
+	startedSession(t, r)
+	_ = r.e.startEpisode(context.Background())
+	r.exec.set("running")
+	r.clock.advance(250 * time.Millisecond)
+	r.e.tick(context.Background())
+	if r.e.status()["state"] != "idle" || lastOutcome(t, r) != "error" {
+		t.Fatalf("status %v", r.e.status())
+	}
+	if got := r.exec.names(); got[len(got)-1] != "stop" {
+		t.Fatalf("executor must be stopped: %v", got)
+	}
+}
+
+func TestLabelRefusals(t *testing.T) {
+	r := newRig(t, true)
+	ctx := context.Background()
+	startedSession(t, r)
+	if err := r.e.label(ctx, "success"); err == nil {
+		t.Fatal("label in idle must be refused")
+	}
+	r.e.startEpisode(ctx)
+	r.exec.set("running")
+	r.clock.advance(250 * time.Millisecond)
+	r.e.tick(ctx)
+	if err := r.e.label(ctx, "bogus"); err == nil {
+		t.Fatal("bad outcome must be refused")
+	}
+	if r.e.status()["state"] != "policy" {
+		t.Fatal("a bad outcome must not disturb the episode")
+	}
+}
+
+func TestLabelExecutorStopFailureAborts(t *testing.T) {
+	r := newRig(t, true)
+	inPolicy(t, r)
+	r.exec.failOn = "stop"
+	if err := r.e.label(context.Background(), "success"); err == nil {
+		t.Fatal("expected the stop failure")
+	}
+	if r.e.status()["state"] != "idle" || lastOutcome(t, r) != "error" {
+		t.Fatalf("status %v", r.e.status())
+	}
+	if got := r.capture.names(); got[len(got)-1] != "stop_capture" {
+		t.Fatalf("capture must be stopped: %v", got)
+	}
+}
+
+func TestAbortTwiceIsNoop(t *testing.T) {
+	r := newRig(t, true)
+	inPolicy(t, r)
+	r.e.abort("error", "boom")
+	n := len(r.exec.names()) + len(r.capture.names())
+	r.e.abort("error", "again")
+	segs, _ := readSegments(r.e.logDir, "s1")
+	if len(segs) != 1 || n != len(r.exec.names())+len(r.capture.names()) || r.e.status()["last_error"] != "boom" {
+		t.Fatalf("second abort changed things: %v %v", segs, r.e.status())
+	}
+}
+
+type statusFailDoer struct{ *fakeDoer }
+
+func (s statusFailDoer) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
+	if cmdName(cmd) == "status" {
+		return nil, errors.New("status down")
+	}
+	return s.fakeDoer.DoCommand(ctx, cmd)
+}
+
+func TestStatusFailingThreeTimesAborts(t *testing.T) {
+	r := newRig(t, true)
+	r.e.exec = statusFailDoer{r.exec}
+	startedSession(t, r)
+	_ = r.e.startEpisode(context.Background())
+	for i := 0; i < 3; i++ {
+		if r.e.status()["state"] != "starting" {
+			t.Fatalf("aborted after %d failures", i)
+		}
+		r.clock.advance(250 * time.Millisecond)
+		r.e.tick(context.Background())
+	}
+	if r.e.status()["state"] != "idle" || lastOutcome(t, r) != "error" {
+		t.Fatalf("status %v", r.e.status())
+	}
+}
+
+func TestStatusFailingPastStartTimeoutAborts(t *testing.T) {
+	r := newRig(t, true)
+	r.e.exec = statusFailDoer{r.exec}
+	startedSession(t, r)
+	_ = r.e.startEpisode(context.Background())
+	r.clock.advance(121 * time.Second)
+	r.e.tick(context.Background()) // first failure, but the timeout has passed
+	if r.e.status()["state"] != "idle" {
+		t.Fatalf("status %v", r.e.status())
 	}
 }

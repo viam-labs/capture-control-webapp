@@ -23,7 +23,7 @@ const (
 )
 
 type timings struct {
-	heartbeat, hold, call, execStop, policyStart, startPoll, runPoll time.Duration
+	heartbeat, hold, call, status, execStop, policyStart, startPoll, runPoll time.Duration
 }
 
 func defaultTimings() timings {
@@ -31,6 +31,7 @@ func defaultTimings() timings {
 		heartbeat:   2 * time.Second,
 		hold:        500 * time.Millisecond,
 		call:        5 * time.Second,
+		status:      time.Second,
 		execStop:    15 * time.Second,
 		policyStart: 120 * time.Second,
 		startPoll:   200 * time.Millisecond,
@@ -59,16 +60,17 @@ type engine struct {
 	engineDeps
 	opMu sync.Mutex // serializes start_session/start_episode/take_over/label and monitor transitions
 
-	mu        sync.Mutex // guards the fields below
-	phase     phase
-	sess      *session
-	seg       *segment // open segment (starting, policy or correction)
-	capturing bool
-	lastBeat  time.Time
-	lastPoll  time.Time
-	startedAt time.Time
-	lastErr   string
-	opCancel  context.CancelFunc
+	mu          sync.Mutex // guards the fields below
+	phase       phase
+	sess        *session
+	seg         *segment // open segment (starting, policy or correction)
+	capturing   bool
+	lastBeat    time.Time
+	lastPoll    time.Time
+	startedAt   time.Time
+	lastErr     string
+	opCancel    context.CancelFunc
+	statusFails int // consecutive failed status polls while starting
 }
 
 func newEngine(d engineDeps) *engine {
@@ -155,7 +157,7 @@ func (e *engine) finish(outcome, errMsg string) {
 		return
 	}
 	e.seg.TEnd, e.seg.Outcome, e.seg.Error = e.now(), outcome, errMsg
-	if err := appendSegment(e.logDir, *e.seg); err != nil && e.lastErr == "" {
+	if err := appendSegment(e.logDir, *e.seg); err != nil {
 		e.lastErr = "session log: " + err.Error()
 	}
 	e.sess.Counts[e.seg.Source+":"+outcome]++
@@ -186,7 +188,7 @@ func (e *engine) startEpisode(ctx context.Context) error {
 		e.finish("error", err.Error())
 		return err
 	}
-	e.phase = phaseStarting
+	e.phase, e.statusFails = phaseStarting, 0
 	e.startedAt = e.now()
 	e.lastBeat, e.lastPoll = e.startedAt, e.startedAt
 	return nil
@@ -201,23 +203,38 @@ func (e *engine) tick(ctx context.Context) {
 		return
 	}
 	e.lastPoll = e.now()
+	seg := e.seg // identifies this episode; a stale poll must not act on a newer one
 	e.mu.Unlock()
 
-	st, err := call(ctx, e.exec, map[string]interface{}{"command": "status"}, e.timings.call)
-	if err != nil {
-		return // transient; the next poll retries
-	}
-	state, _ := st["state"].(string)
-	lastErr, _ := st["last_error"].(string)
-	switch state {
-	case "running", "error", "stopped", "idle":
-	default: // waiting_for_policy
-		e.mu.Lock()
-		late := e.now().Sub(e.startedAt) > e.timings.policyStart
+	st, err := call(ctx, e.exec, map[string]interface{}{"command": "status"}, min(e.timings.call, e.timings.status))
+	state, lastErr := "", ""
+	e.mu.Lock()
+	if e.seg != seg || e.phase != phaseStarting {
 		e.mu.Unlock()
-		if !late {
-			return
-		}
+		return
+	}
+	if err != nil {
+		e.statusFails++
+	} else {
+		e.statusFails = 0
+		state, _ = st["state"].(string)
+		lastErr, _ = st["last_error"].(string)
+	}
+	fails := e.statusFails
+	late := e.now().Sub(e.startedAt) > e.timings.policyStart
+	sess := *e.sess
+	e.mu.Unlock()
+
+	abortMsg := ""
+	switch {
+	case err != nil && fails >= 3:
+		abortMsg = "executor status unavailable: " + err.Error()
+	case state == "error" || state == "stopped" || state == "idle":
+		abortMsg = fmt.Sprintf("executor state %s: %s", state, lastErr)
+	case state != "running" && late:
+		abortMsg = fmt.Sprintf("policy did not start within %s", e.timings.policyStart)
+	case state != "running":
+		return
 	}
 	if !e.opMu.TryLock() {
 		return
@@ -226,31 +243,27 @@ func (e *engine) tick(ctx context.Context) {
 	ctx, done := e.beginOp(ctx)
 	defer done()
 	e.mu.Lock()
-	if e.phase != phaseStarting {
+	if e.phase != phaseStarting || e.seg != seg {
 		e.mu.Unlock()
 		return
 	}
-	sess := *e.sess
 	e.mu.Unlock()
-	switch state {
-	case "running":
-		_, err := call(ctx, e.capture, map[string]interface{}{
-			"start_capture": true, "frequency_hz": sess.FPS,
-			"tags": []string{"task:" + sess.Task, "session:" + sess.ID, fmt.Sprintf("episode:%d", sess.Episodes),
-				"source:policy", "checkpoint:" + sess.Checkpoint, fmt.Sprintf("fps:%g", sess.FPS)},
-		}, e.timings.call)
-		if err != nil {
-			e.abort("error", "start capture: "+err.Error())
-			return
-		}
-		e.mu.Lock()
-		e.capturing, e.seg.TStart, e.phase = true, e.now(), phasePolicy
-		e.mu.Unlock()
-	case "error", "stopped", "idle":
-		e.abort("error", fmt.Sprintf("executor state %s: %s", state, lastErr))
-	default:
-		e.abort("error", fmt.Sprintf("policy did not start within %s", e.timings.policyStart))
+	if abortMsg != "" {
+		e.abort("error", abortMsg)
+		return
 	}
+	_, err = call(ctx, e.capture, map[string]interface{}{
+		"start_capture": true, "frequency_hz": sess.FPS,
+		"tags": []string{"task:" + sess.Task, "session:" + sess.ID, fmt.Sprintf("episode:%d", sess.Episodes),
+			"source:policy", "checkpoint:" + sess.Checkpoint, fmt.Sprintf("fps:%g", sess.FPS)},
+	}, e.timings.call)
+	if err != nil {
+		e.abort("error", "start capture: "+err.Error())
+		return
+	}
+	e.mu.Lock()
+	e.capturing, e.seg.TStart, e.phase = true, e.now(), phasePolicy
+	e.mu.Unlock()
 }
 
 // stopExecutorAndWait stops the executor and waits (bounded by execStop) until it leaves running.
@@ -274,17 +287,14 @@ func (e *engine) stopExecutorAndWait(ctx context.Context) error {
 	}
 }
 
-// abort is best-effort and never takes opMu (operations call it while holding it).
+// abort is best-effort and never takes opMu: the caller must hold opMu.
 // It leaves the session open and the phase idle. Safe to call twice.
 func (e *engine) abort(outcome, msg string) {
 	e.mu.Lock()
-	ph, capt, cancel := e.phase, e.capturing, e.opCancel
+	ph, capt := e.phase, e.capturing
 	e.mu.Unlock()
 	if ph != phaseStarting && ph != phasePolicy && ph != phaseCorrection {
 		return
-	}
-	if cancel != nil {
-		cancel() // interrupt an operation's in-flight call; we use fresh contexts below
 	}
 	bg := context.Background()
 	if ph == phaseStarting || ph == phasePolicy {
@@ -299,7 +309,11 @@ func (e *engine) abort(outcome, msg string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.capturing = false
+	e.lastErr = ""
 	e.finish(outcome, msg)
+	if e.lastErr != "" { // finish recorded a log write error: keep it
+		msg += "; " + e.lastErr
+	}
 	e.lastErr, e.phase = msg, phaseIdle
 }
 
