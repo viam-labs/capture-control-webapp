@@ -39,3 +39,8 @@ export function summary(segs: Segment[]) {
     corrections: segs.filter((s) => s.source === 'correction').length,
   };
 }
+
+/** The runner needs a heartbeat in these states. */
+export const needsHeartbeat = (state: string): boolean => state === 'starting' || state === 'policy' || state === 'correction';
+/** Only these allow home and a fresh episode; an unknown state string counts as busy. */
+export const isIdle = (state: string): boolean => state === 'idle' || state === 'no_session';

@@ -35,3 +35,9 @@ test('summary counts and rates over success, failure and takeover only', () => {
   assert.deepEqual(r.summary(segs), { episodes: 6, success: 2, failure: 1, takeover: 1, error: 1, stopped: 1, successRate: 0.5, corrections: 1 });
   assert.equal(r.summary([seg('s', 1, 'policy', 'error')]).successRate, undefined);
 });
+
+test('needsHeartbeat and isIdle: unknown states are busy and need no heartbeat', () => {
+  for (const s of ['starting', 'policy', 'correction']) assert.ok(r.needsHeartbeat(s) && !r.isIdle(s));
+  for (const s of ['idle', 'no_session']) assert.ok(r.isIdle(s) && !r.needsHeartbeat(s));
+  assert.ok(!r.isIdle('weird') && !r.needsHeartbeat('weird'));
+});

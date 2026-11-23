@@ -6,6 +6,8 @@
   import * as rb from './robot.ts';
   import CameraFeed from './CameraFeed.svelte';
   import Review from './Review.svelte';
+  import PolicySession from './PolicySession.svelte';
+  import * as rn from './runner.ts';
 
   let { partID }: { partID: string } = $props();
 
@@ -57,6 +59,8 @@
     if (!tasks.includes(activeTask)) activeTask = tasks[0] ?? '';
   });
 
+  let runners = $state<string[]>([]);
+  let policy = $state(false); // Policy session view (PolicySession) replaces the recorder
   let teleops = $state<string[]>([]);
   let teleopStatus = $state<rb.TeleopStatus | undefined>();
   let teleopRequested = false;
@@ -102,6 +106,16 @@
   const canStart = $derived(!!sensor && !orphaned && !!activeTask && !homing);
   const episodesDone = $derived(session ? Object.values(session.counts).reduce((a, b) => a + b, 0) : 0);
   const canReview = $derived(connected && !!robot.current && !active && !homing);
+  const canPolicy = $derived(connected && runners.length === 1 && !active && !homing && !reviewing);
+  // PolicySession's H: same path as doHome, but the runner (not a recording session) gates it.
+  const canHomePolicy = $derived(connected && homeSavers.length > 0 && teleops.length <= 1);
+  async function homePolicy() {
+    const client = robot.current;
+    if (client) await rb.home(teleop, homeSavers.map((n) => new SwitchClient(client, n)));
+  }
+  $effect(() => {
+    if (!robot.current || runners.length !== 1) policy = false;
+  });
   // The client only goes away on a dial-config change or unmount; close review so keys and layout stay consistent.
   $effect(() => {
     if (!robot.current) reviewing = undefined;
@@ -137,6 +151,18 @@
       const r = await rb.withTimeout(new GenericServiceClient(client, name).doCommand({ command: 'status' }), rb.CALL_TIMEOUT_MS, name);
       return rb.asTeleopStatus(r) ? name : undefined;
     }).then((found) => (teleops = found));
+  });
+
+  // Discover episode runners: generic services whose status reply has episode_runner: true. Exactly one is used.
+  $effect(() => {
+    const client = robot.current;
+    const names = generics.current.filter((r) => r.type === 'service').map((r) => r.name);
+    discoverTick;
+    if (!client || !connected || !generics.query?.isSuccess) return;
+    probe(names, async (name) => {
+      const r = await rb.withTimeout(new GenericServiceClient(client, name).doCommand({ command: 'status' }), rb.CALL_TIMEOUT_MS, name);
+      return rn.asRunnerStatus(r) ? name : undefined;
+    }).then((found) => (runners = found));
   });
 
   // Discover arm-position-saver switches by their position labels.
@@ -281,7 +307,7 @@
   }
 
   function onKey(e: KeyboardEvent) {
-    if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.repeat || e.ctrlKey || e.metaKey || e.altKey || policy) return;
     if (reviewing && e.key !== 't' && e.key !== 'T') return; // Review owns the keys; T (teleop / emergency stop) still works
     if (e.target instanceof Element && e.target.closest('input, select, textarea')) return;
     if (e.key === '?') {
@@ -335,7 +361,7 @@
     // Read-only, so it runs outside the driver. pollSeq drops results that a toggle or home has superseded.
     let polls = 0;
     const poll = setInterval(() => {
-      if (!teleops.length && connected && ++polls % 10 === 0) discoverTick++; // ponytail: 10 s retry until found
+      if ((!teleops.length || !runners.length) && connected && ++polls % 10 === 0) discoverTick++; // ponytail: 10 s retry until found
       const t = teleop;
       const seq = pollSeq;
       if (!t || !connected) return void (teleopStatus = undefined);
@@ -435,7 +461,10 @@
     {/if}
   {/snippet}
 
-  {#if reviewing && robot.current}
+  {#if policy && robot.current}
+    <PolicySession {partID} robot={robot.current} runner={runners[0]} {cameraNames} {tasks} {activeTask} fps={settings.fps}
+      canHome={canHomePolicy} home={homePolicy} onclose={() => (policy = false)} />
+  {:else if reviewing && robot.current}
     <div class="review-banners">{@render banners()}</div>
     <Review robot={robot.current} session={reviewing.session} onclose={() => (reviewing = undefined)} />
   {:else}
@@ -487,6 +516,9 @@
           </button>
         {/if}
         <button type="button" disabled={!canReview} onclick={(e) => { openReview(false); e.currentTarget.blur(); }}>Episodes</button>
+        {#if runners.length === 1}
+          <button type="button" disabled={!canPolicy} onclick={(e) => { policy = true; e.currentTarget.blur(); }}>Policy session</button>
+        {/if}
       </div>
       {@render palette()}
       {@render robotControls()}
