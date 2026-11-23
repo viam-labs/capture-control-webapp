@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"go.viam.com/rdk/logging"
 )
 
 type doer interface {
@@ -54,6 +56,7 @@ type engineDeps struct {
 	now                   func() time.Time
 	sleep                 func(ctx context.Context, d time.Duration) error
 	newID                 func() string
+	logger                logging.Logger // may be nil
 }
 
 type engine struct {
@@ -164,6 +167,9 @@ func (e *engine) finish(outcome, errMsg string) {
 	e.seg.TEnd, e.seg.Outcome, e.seg.Error = e.now(), outcome, errMsg
 	if err := appendSegment(e.logDir, *e.seg); err != nil {
 		e.lastErr = "session log: " + err.Error()
+		if e.logger != nil {
+			e.logger.Errorw("session log write failed", "error", err)
+		}
 	}
 	e.sess.Counts[e.seg.Source+":"+outcome]++
 	e.seg = nil
@@ -359,6 +365,9 @@ func (e *engine) abort(outcome, msg string) {
 	e.mu.Unlock()
 	if ph != phaseStarting && ph != phasePolicy && ph != phaseCorrection {
 		return
+	}
+	if e.logger != nil {
+		e.logger.Warnw("episode aborted", "outcome", outcome, "message", msg)
 	}
 	bg := context.Background()
 	if (ph == phaseStarting || ph == phasePolicy) && !execDone {

@@ -111,7 +111,7 @@ func newRunner(ctx context.Context, deps resource.Dependencies, raw resource.Con
 	e := newEngine(engineDeps{
 		exec: exec, teleop: teleop, capture: capture,
 		timings: conf.timings(), safeTakeover: conf.TeleopSafeTakeover,
-		logDir: moduleLogDir(), now: time.Now, newID: newID,
+		logDir: moduleLogDir(), now: time.Now, newID: newID, logger: logger,
 		sleep: func(ctx context.Context, d time.Duration) error {
 			select {
 			case <-time.After(d):
@@ -139,31 +139,40 @@ func newRunner(ctx context.Context, deps resource.Dependencies, raw resource.Con
 	return r, nil
 }
 
+func okOrErr(err error) (map[string]interface{}, error) {
+	if err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{"ok": true}, nil
+}
+
 func (r *runner) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
 	name, _ := cmd["command"].(string)
-	ok := map[string]interface{}{"ok": true}
 	switch name {
 	case "status":
 		return r.e.status(), nil
 	case "heartbeat":
 		r.e.heartbeat()
-		return ok, nil
+		return map[string]interface{}{"ok": true}, nil
 	case "start_session":
 		task, _ := cmd["task"].(string)
 		checkpoint, _ := cmd["checkpoint"].(string)
 		fps, _ := cmd["fps"].(float64) // JSON numbers arrive as float64
-		return ok, r.e.startSession(task, checkpoint, fps)
+		return okOrErr(r.e.startSession(task, checkpoint, fps))
 	case "start_episode":
-		return ok, r.e.startEpisode(ctx)
+		return okOrErr(r.e.startEpisode(ctx))
 	case "take_over":
-		return ok, r.e.takeOver(ctx)
+		return okOrErr(r.e.takeOver(ctx))
 	case "label":
 		outcome, _ := cmd["outcome"].(string)
-		return ok, r.e.label(ctx, outcome)
+		return okOrErr(r.e.label(ctx, outcome))
 	case "stop":
-		return ok, r.e.stop(ctx)
+		return okOrErr(r.e.stop(ctx))
 	case "log":
 		session, _ := cmd["session"].(string)
+		if session != "" && (filepath.Base(session) != session || session == "." || session == "..") {
+			return nil, fmt.Errorf("invalid session %q", session)
+		}
 		segs, err := r.e.log(session)
 		if err != nil {
 			return nil, err

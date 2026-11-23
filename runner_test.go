@@ -58,8 +58,25 @@ func TestRunnerDoCommand(t *testing.T) {
 	if s := st["session"].(map[string]interface{}); s["task"] != "pick" || s["fps"] != 15.0 {
 		t.Fatalf("session %v", s)
 	}
-	if out, err := do(map[string]interface{}{"command": "log"}); err != nil || out["segments"] == nil {
+	if out, err := do(map[string]interface{}{"command": "log"}); err != nil || len(out["segments"].([]interface{})) != 0 {
 		t.Fatalf("log %v %v", out, err)
+	}
+}
+
+func TestRunnerLogRejectsTraversal(t *testing.T) {
+	r := &runner{e: newRig(t, true).e}
+	for _, s := range []string{"..", ".", "../x", "a/b", `a\b/c`} {
+		if _, err := r.DoCommand(context.Background(), map[string]interface{}{"command": "log", "session": s}); err == nil {
+			t.Fatalf("session %q must be rejected", s)
+		}
+	}
+}
+
+func TestRunnerErrorReplyHasNoOK(t *testing.T) {
+	r := &runner{e: newRig(t, true).e}
+	out, err := r.DoCommand(context.Background(), map[string]interface{}{"command": "start_episode"})
+	if err == nil || out != nil {
+		t.Fatalf("out %v err %v", out, err)
 	}
 }
 

@@ -40,6 +40,7 @@ during a policy session; the web app is its operator UI.
     "heartbeat_timeout_ms": 2000,
     "takeover_hold_ms": 500,
     "call_timeout_ms": 5000,
+    "status_timeout_ms": 1000,
     "executor_stop_timeout_ms": 15000,
     "policy_start_timeout_ms": 120000,
     "teleop_safe_takeover": true
@@ -158,7 +159,7 @@ the review code path that already tags sequences with the machine's credentials.
 - **Executor error**: the runner polls executor `status` every 200 ms in `starting` and about once a second in `policy`. Capture starts on the first `running` poll, so a policy sequence can miss up to about 200 ms of the run's first motion; that is expected. `state` of
   `error`, or `stopped` / `idle` while it expects a run, ends the episode with `outcome: error`. `last_error` with
   `state: running` is logged, not acted on.
-- **Dependency timeout**: any bounded call that times out stops everything, except the executor `status` poll: each read is bounded to 1 s, and 3 consecutive failed reads stop everything (one dropped read on a busy network should not end an episode). The policy-start timeout applies whether or not the reads succeed.
+- **Dependency timeout**: any bounded call that times out stops everything, except the executor `status` poll: each read is bounded by `status_timeout_ms` (default 1 s), and 3 consecutive failed reads stop everything (one dropped read on a busy network should not end an episode). The policy-start timeout applies whether or not the reads succeed.
 - **Reconfigure or close**: stops everything first.
 - All stop paths are idempotent; `status` always reports the state and the last error.
 

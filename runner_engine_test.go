@@ -6,6 +6,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"go.viam.com/rdk/logging"
 )
 
 // fakeDoer records commands and answers like the real dependency.
@@ -116,7 +118,8 @@ func newRig(t *testing.T, safeTakeover bool) *rig {
 			r.sleptMu.Unlock()
 			return ctx.Err()
 		},
-		newID: func() string { return "s1" },
+		newID:  func() string { return "s1" },
+		logger: logging.NewTestLogger(t),
 	})
 	return r
 }
