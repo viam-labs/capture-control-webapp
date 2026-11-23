@@ -12,7 +12,7 @@ import (
 type fakeDoer struct {
 	mu      sync.Mutex
 	kind    string // "executor", "teleop", "capture"
-	calls   []map[string]interface{}
+	rec     []map[string]interface{}
 	state   string // executor state
 	running bool   // teleop running
 	failOn  string // command name that returns an error
@@ -31,7 +31,7 @@ func cmdName(cmd map[string]interface{}) string {
 
 func (f *fakeDoer) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
 	f.mu.Lock()
-	f.calls = append(f.calls, cmd)
+	f.rec = append(f.rec, cmd)
 	name, block := cmdName(cmd), f.block
 	if name == f.failOn {
 		f.mu.Unlock()
@@ -63,12 +63,18 @@ func (f *fakeDoer) names() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var out []string
-	for _, c := range f.calls {
+	for _, c := range f.rec {
 		if n := cmdName(c); n != "status" {
 			out = append(out, n)
 		}
 	}
 	return out
+}
+
+func (f *fakeDoer) calls() []map[string]interface{} {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]map[string]interface{}(nil), f.rec...)
 }
 
 func (f *fakeDoer) set(state string) { f.mu.Lock(); f.state = state; f.mu.Unlock() }
@@ -85,6 +91,7 @@ type rig struct {
 	e                     *engine
 	exec, teleop, capture *fakeDoer
 	clock                 *fakeClock
+	sleptMu               sync.Mutex
 	slept                 []time.Duration
 }
 
@@ -101,8 +108,13 @@ func newRig(t *testing.T, safeTakeover bool) *rig {
 		safeTakeover: safeTakeover,
 		logDir:       t.TempDir(),
 		now:          r.clock.now,
-		sleep:        func(ctx context.Context, d time.Duration) error { r.slept = append(r.slept, d); return ctx.Err() },
-		newID:        func() string { return "s1" },
+		sleep: func(ctx context.Context, d time.Duration) error {
+			r.sleptMu.Lock()
+			r.slept = append(r.slept, d)
+			r.sleptMu.Unlock()
+			return ctx.Err()
+		},
+		newID: func() string { return "s1" },
 	})
 	return r
 }
@@ -148,5 +160,120 @@ func TestHeartbeatUpdatesLastBeat(t *testing.T) {
 	r.e.heartbeat()
 	if !r.e.lastBeat.Equal(r.clock.now()) {
 		t.Fatal("heartbeat must record the current time")
+	}
+}
+
+func startedSession(t *testing.T, r *rig) {
+	t.Helper()
+	if err := r.e.startSession("pick", "pi05-v1", 10); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStartEpisodeWaitsForRunningBeforeCapture(t *testing.T) {
+	r := newRig(t, true)
+	ctx := context.Background()
+	startedSession(t, r)
+	if err := r.e.startEpisode(ctx); err != nil {
+		t.Fatal(err)
+	}
+	st := r.e.status()
+	if st["state"] != "starting" || st["episode"].(map[string]interface{})["started"] != r.clock.now().UnixMilli() {
+		t.Fatalf("status %v", st)
+	}
+	r.clock.advance(250 * time.Millisecond)
+	r.e.tick(ctx) // executor still waiting_for_policy
+	if len(r.capture.names()) != 0 {
+		t.Fatal("capture must not start before the executor runs")
+	}
+	r.exec.set("running")
+	r.clock.advance(250 * time.Millisecond)
+	r.e.tick(ctx)
+	if got := r.e.status()["state"]; got != "policy" {
+		t.Fatalf("state %v", got)
+	}
+	c := r.capture.calls()[0]
+	tags := c["tags"].([]string)
+	want := []string{"task:pick", "session:s1", "episode:1", "source:policy", "checkpoint:pi05-v1", "fps:10"}
+	if len(tags) != len(want) {
+		t.Fatalf("tags %v", tags)
+	}
+	for i := range want {
+		if tags[i] != want[i] {
+			t.Fatalf("tags %v", tags)
+		}
+	}
+}
+
+func TestPolicyStartTimeout(t *testing.T) {
+	r := newRig(t, true)
+	ctx := context.Background()
+	startedSession(t, r)
+	_ = r.e.startEpisode(ctx)
+	for i := 0; i < 700; i++ { // 140 s of heartbeats + polls
+		r.clock.advance(200 * time.Millisecond)
+		r.e.heartbeat()
+		r.e.tick(ctx)
+	}
+	st := r.e.status()
+	if st["state"] != "idle" || st["last_error"] == "" {
+		t.Fatalf("status %v", st)
+	}
+	segs, _ := readSegments(r.e.logDir, "s1")
+	if len(segs) != 1 || segs[0].Outcome != "error" {
+		t.Fatalf("log %v", segs)
+	}
+}
+
+func TestLabelSuccessStopsExecutorThenCapture(t *testing.T) {
+	r := newRig(t, true)
+	ctx := context.Background()
+	startedSession(t, r)
+	_ = r.e.startEpisode(ctx)
+	r.exec.set("running")
+	r.clock.advance(250 * time.Millisecond)
+	r.e.tick(ctx)
+	if err := r.e.label(ctx, "success"); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.exec.names(); got[len(got)-1] != "stop" {
+		t.Fatalf("executor calls %v", got)
+	}
+	if got := r.capture.names(); len(got) != 2 || got[1] != "stop_capture" {
+		t.Fatalf("capture calls %v", got)
+	}
+	segs, _ := readSegments(r.e.logDir, "s1")
+	if len(segs) != 1 || segs[0].Outcome != "success" || segs[0].Source != "policy" {
+		t.Fatalf("log %v", segs)
+	}
+	st := r.e.status()
+	if st["state"] != "idle" || st["session"].(map[string]interface{})["counts"].(map[string]interface{})["policy:success"] != 1 {
+		t.Fatalf("status %v", st)
+	}
+}
+
+func TestExecutorRefusesStart(t *testing.T) {
+	r := newRig(t, true)
+	r.exec.failOn = "start"
+	startedSession(t, r)
+	if err := r.e.startEpisode(context.Background()); err == nil {
+		t.Fatal("expected the refusal")
+	}
+	segs, _ := readSegments(r.e.logDir, "s1")
+	if len(segs) != 1 || segs[0].Outcome != "error" || r.e.status()["state"] != "idle" {
+		t.Fatalf("log %v", segs)
+	}
+}
+
+func TestExecutorErrorDuringStartingAborts(t *testing.T) {
+	r := newRig(t, true)
+	ctx := context.Background()
+	startedSession(t, r)
+	_ = r.e.startEpisode(ctx)
+	r.exec.set("error")
+	r.clock.advance(250 * time.Millisecond)
+	r.e.tick(ctx)
+	if r.e.status()["state"] != "idle" || len(r.capture.names()) != 0 {
+		t.Fatal("an executor error while starting must abort without capturing")
 	}
 }

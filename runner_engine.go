@@ -92,7 +92,7 @@ func (e *engine) startSession(task, checkpoint string, fps float64) error {
 	if task == "" {
 		return errors.New("start_session needs a task")
 	}
-	if fps <= 0 {
+	if !(fps > 0) {
 		fps = 10
 	}
 	e.sess = &session{ID: e.newID(), Task: task, Checkpoint: checkpoint, FPS: fps, Counts: map[string]int{}}
@@ -128,14 +128,179 @@ func (e *engine) status() map[string]interface{} {
 	return out
 }
 
-// Stubs filled in by later tasks.
-func (e *engine) startEpisode(ctx context.Context) error {
+// beginOp derives the operation's context and publishes its cancel func so
+// abort can interrupt a dependency call in flight. Call with opMu held.
+func (e *engine) beginOp(ctx context.Context) (context.Context, func()) {
+	c, cancel := context.WithCancel(ctx)
 	e.mu.Lock()
-	defer e.mu.Unlock()
+	e.opCancel = cancel
+	e.mu.Unlock()
+	return c, func() {
+		e.mu.Lock()
+		e.opCancel = nil
+		e.mu.Unlock()
+		cancel()
+	}
+}
+
+func call(ctx context.Context, d doer, cmd map[string]interface{}, timeout time.Duration) (map[string]interface{}, error) {
+	c, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	return d.DoCommand(c, cmd)
+}
+
+// finish closes the open segment into the log. mu must be held.
+func (e *engine) finish(outcome, errMsg string) {
+	if e.seg == nil {
+		return
+	}
+	e.seg.TEnd, e.seg.Outcome, e.seg.Error = e.now(), outcome, errMsg
+	if err := appendSegment(e.logDir, *e.seg); err != nil && e.lastErr == "" {
+		e.lastErr = "session log: " + err.Error()
+	}
+	e.sess.Counts[e.seg.Source+":"+outcome]++
+	e.seg = nil
+}
+
+func (e *engine) startEpisode(ctx context.Context) error {
+	e.opMu.Lock()
+	defer e.opMu.Unlock()
+	ctx, done := e.beginOp(ctx)
+	defer done()
+	e.mu.Lock()
 	if e.phase != phaseIdle {
+		defer e.mu.Unlock()
 		return fmt.Errorf("start_episode not allowed in %s", e.phase)
 	}
-	return errors.New("not implemented")
+	e.sess.Episodes++
+	e.seg = &segment{Session: e.sess.ID, Episode: e.sess.Episodes, Source: "policy",
+		Task: e.sess.Task, Checkpoint: e.sess.Checkpoint, TStart: e.now()}
+	e.lastErr = ""
+	task := e.sess.Task
+	e.mu.Unlock()
+
+	_, err := call(ctx, e.exec, map[string]interface{}{"command": "start", "task": task}, e.timings.call)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err != nil {
+		e.finish("error", err.Error())
+		return err
+	}
+	e.phase = phaseStarting
+	e.startedAt = e.now()
+	e.lastBeat, e.lastPoll = e.startedAt, e.startedAt
+	return nil
+}
+
+// tick is the monitor step. It never blocks on opMu: a busy lock means an
+// operation is in flight, so it retries on the next tick.
+func (e *engine) tick(ctx context.Context) {
+	e.mu.Lock()
+	if e.phase != phaseStarting || e.now().Sub(e.lastPoll) < e.timings.startPoll {
+		e.mu.Unlock()
+		return
+	}
+	e.lastPoll = e.now()
+	e.mu.Unlock()
+
+	st, err := call(ctx, e.exec, map[string]interface{}{"command": "status"}, e.timings.call)
+	if err != nil {
+		return // transient; the next poll retries
+	}
+	state, _ := st["state"].(string)
+	lastErr, _ := st["last_error"].(string)
+	switch state {
+	case "running", "error", "stopped", "idle":
+	default: // waiting_for_policy
+		e.mu.Lock()
+		late := e.now().Sub(e.startedAt) > e.timings.policyStart
+		e.mu.Unlock()
+		if !late {
+			return
+		}
+	}
+	if !e.opMu.TryLock() {
+		return
+	}
+	defer e.opMu.Unlock()
+	ctx, done := e.beginOp(ctx)
+	defer done()
+	e.mu.Lock()
+	if e.phase != phaseStarting {
+		e.mu.Unlock()
+		return
+	}
+	sess := *e.sess
+	e.mu.Unlock()
+	switch state {
+	case "running":
+		_, err := call(ctx, e.capture, map[string]interface{}{
+			"start_capture": true, "frequency_hz": sess.FPS,
+			"tags": []string{"task:" + sess.Task, "session:" + sess.ID, fmt.Sprintf("episode:%d", sess.Episodes),
+				"source:policy", "checkpoint:" + sess.Checkpoint, fmt.Sprintf("fps:%g", sess.FPS)},
+		}, e.timings.call)
+		if err != nil {
+			e.abort("error", "start capture: "+err.Error())
+			return
+		}
+		e.mu.Lock()
+		e.capturing, e.seg.TStart, e.phase = true, e.now(), phasePolicy
+		e.mu.Unlock()
+	case "error", "stopped", "idle":
+		e.abort("error", fmt.Sprintf("executor state %s: %s", state, lastErr))
+	default:
+		e.abort("error", fmt.Sprintf("policy did not start within %s", e.timings.policyStart))
+	}
+}
+
+// stopExecutorAndWait stops the executor and waits (bounded by execStop) until it leaves running.
+func (e *engine) stopExecutorAndWait(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, e.timings.execStop)
+	defer cancel()
+	if _, err := call(ctx, e.exec, map[string]interface{}{"command": "stop"}, e.timings.execStop); err != nil {
+		return err
+	}
+	for {
+		st, err := call(ctx, e.exec, map[string]interface{}{"command": "status"}, e.timings.call)
+		if err != nil {
+			return err
+		}
+		if s, _ := st["state"].(string); s != "running" {
+			return nil
+		}
+		if err := e.sleep(ctx, 100*time.Millisecond); err != nil {
+			return fmt.Errorf("executor did not stop: %w", err)
+		}
+	}
+}
+
+// abort is best-effort and never takes opMu (operations call it while holding it).
+// It leaves the session open and the phase idle. Safe to call twice.
+func (e *engine) abort(outcome, msg string) {
+	e.mu.Lock()
+	ph, capt, cancel := e.phase, e.capturing, e.opCancel
+	e.mu.Unlock()
+	if ph != phaseStarting && ph != phasePolicy && ph != phaseCorrection {
+		return
+	}
+	if cancel != nil {
+		cancel() // interrupt an operation's in-flight call; we use fresh contexts below
+	}
+	bg := context.Background()
+	if ph == phaseStarting || ph == phasePolicy {
+		_, _ = call(bg, e.exec, map[string]interface{}{"command": "stop"}, e.timings.execStop)
+	}
+	if ph == phaseCorrection && e.teleop != nil {
+		_, _ = call(bg, e.teleop, map[string]interface{}{"command": "stop"}, e.timings.call)
+	}
+	if capt {
+		_, _ = call(bg, e.capture, map[string]interface{}{"stop_capture": true}, e.timings.call)
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.capturing = false
+	e.finish(outcome, msg)
+	e.lastErr, e.phase = msg, phaseIdle
 }
 
 func (e *engine) takeOver(ctx context.Context) error {
@@ -145,7 +310,31 @@ func (e *engine) takeOver(ctx context.Context) error {
 }
 
 func (e *engine) label(ctx context.Context, outcome string) error {
+	e.opMu.Lock()
+	defer e.opMu.Unlock()
+	ctx, done := e.beginOp(ctx)
+	defer done()
+	e.mu.Lock()
+	ph := e.phase
+	e.mu.Unlock()
+	if ph != phasePolicy {
+		return fmt.Errorf("label not allowed in %s", ph)
+	}
+	if outcome != "success" && outcome != "failure" {
+		return fmt.Errorf("label outcome must be success or failure, got %q", outcome)
+	}
+	if err := e.stopExecutorAndWait(ctx); err != nil {
+		e.abort("error", "stop executor: "+err.Error())
+		return err
+	}
+	if _, err := call(ctx, e.capture, map[string]interface{}{"stop_capture": true}, e.timings.call); err != nil {
+		e.abort("error", "stop capture: "+err.Error())
+		return err
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return fmt.Errorf("label not allowed in %s", e.phase)
+	e.capturing = false
+	e.finish(outcome, "")
+	e.phase = phaseIdle
+	return nil
 }

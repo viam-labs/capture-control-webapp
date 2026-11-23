@@ -51,6 +51,7 @@ func readSegments(dir, session string) ([]segment, error) {
 	defer f.Close()
 	out := []segment{}
 	sc := bufio.NewScanner(f)
+	sc.Buffer(nil, 1<<20)
 	for sc.Scan() {
 		var s segment
 		if json.Unmarshal(sc.Bytes(), &s) == nil {
