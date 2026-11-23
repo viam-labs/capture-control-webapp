@@ -70,6 +70,7 @@ type engine struct {
 	startedAt   time.Time
 	lastErr     string
 	opCancel    context.CancelFunc
+	stopping    bool // stop is waiting for opMu: new operations start cancelled
 	statusFails int  // consecutive failed status polls while starting
 	execStopped bool // takeOver already stopped the executor; abort need not wait on it again
 }
@@ -137,6 +138,9 @@ func (e *engine) beginOp(ctx context.Context) (context.Context, func()) {
 	c, cancel := context.WithCancel(ctx)
 	e.mu.Lock()
 	e.opCancel = cancel
+	if e.stopping {
+		cancel()
+	}
 	e.mu.Unlock()
 	return c, func() {
 		e.mu.Lock()
@@ -187,7 +191,7 @@ func (e *engine) startEpisode(ctx context.Context) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if err != nil {
-		e.finish("error", err.Error())
+		e.finish(opOutcome(ctx), err.Error())
 		return err
 	}
 	e.phase, e.statusFails = phaseStarting, 0
@@ -196,22 +200,58 @@ func (e *engine) startEpisode(ctx context.Context) error {
 	return nil
 }
 
+// opOutcome is the log outcome for a failed step: a cancelled operation was stopped, not broken.
+func opOutcome(ctx context.Context) string {
+	if ctx.Err() != nil {
+		return "stopped"
+	}
+	return "error"
+}
+
+// tryAbort aborts the episode seg in phase ph, only if nothing is in flight and
+// the episode is still the one the decision was made on. Never blocks on opMu.
+func (e *engine) tryAbort(ph phase, seg *segment, outcome, msg string) {
+	if !e.opMu.TryLock() {
+		return
+	}
+	defer e.opMu.Unlock()
+	e.mu.Lock()
+	same := e.phase == ph && e.seg == seg
+	e.mu.Unlock()
+	if same {
+		e.abort(outcome, msg)
+	}
+}
+
 // tick is the monitor step. It never blocks on opMu: a busy lock means an
 // operation is in flight, so it retries on the next tick.
 func (e *engine) tick(ctx context.Context) {
 	e.mu.Lock()
-	if e.phase != phaseStarting || e.now().Sub(e.lastPoll) < e.timings.startPoll {
+	ph, seg := e.phase, e.seg
+	if ph != phaseStarting && ph != phasePolicy && ph != phaseCorrection {
+		e.mu.Unlock()
+		return
+	}
+	if e.now().Sub(e.lastBeat) > e.timings.heartbeat {
+		e.mu.Unlock()
+		e.tryAbort(ph, seg, "stopped", "heartbeat lost")
+		return
+	}
+	interval := e.timings.startPoll
+	if ph == phasePolicy {
+		interval = e.timings.runPoll
+	}
+	if ph == phaseCorrection || e.now().Sub(e.lastPoll) < interval {
 		e.mu.Unlock()
 		return
 	}
 	e.lastPoll = e.now()
-	seg := e.seg // identifies this episode; a stale poll must not act on a newer one
 	e.mu.Unlock()
 
 	st, err := call(ctx, e.exec, map[string]interface{}{"command": "status"}, min(e.timings.call, e.timings.status))
 	state, lastErr := "", ""
 	e.mu.Lock()
-	if e.seg != seg || e.phase != phaseStarting {
+	if e.seg != seg || e.phase != ph {
 		e.mu.Unlock()
 		return
 	}
@@ -227,6 +267,18 @@ func (e *engine) tick(ctx context.Context) {
 	sess := *e.sess
 	e.mu.Unlock()
 
+	if ph == phasePolicy {
+		// A takeover keeps the phase at policy while it stops the executor; tryAbort's
+		// TryLock and re-check keep a "stopped" read there from aborting.
+		switch {
+		case err != nil && fails >= 3:
+			e.tryAbort(ph, seg, "error", "executor status unavailable: "+err.Error())
+		case err == nil && state != "running":
+			e.tryAbort(ph, seg, "error", fmt.Sprintf("executor state %s: %s", state, lastErr))
+		}
+		return
+	}
+
 	abortMsg := ""
 	switch {
 	case err != nil && fails >= 3:
@@ -236,6 +288,10 @@ func (e *engine) tick(ctx context.Context) {
 	case state != "running" && late:
 		abortMsg = fmt.Sprintf("policy did not start within %s", e.timings.policyStart)
 	case state != "running":
+		return
+	}
+	if abortMsg != "" {
+		e.tryAbort(ph, seg, "error", abortMsg)
 		return
 	}
 	if !e.opMu.TryLock() {
@@ -249,13 +305,7 @@ func (e *engine) tick(ctx context.Context) {
 		e.mu.Unlock()
 		return
 	}
-	e.mu.Unlock()
-	if abortMsg != "" {
-		e.abort("error", abortMsg)
-		return
-	}
 	// Set before the call: a timed-out start may still have begun recording, and abort must stop it.
-	e.mu.Lock()
 	e.capturing = true
 	e.mu.Unlock()
 	_, err = call(ctx, e.capture, map[string]interface{}{
@@ -264,11 +314,12 @@ func (e *engine) tick(ctx context.Context) {
 			"source:policy", "checkpoint:" + sess.Checkpoint, fmt.Sprintf("fps:%g", sess.FPS)},
 	}, e.timings.call)
 	if err != nil {
-		e.abort("error", "start capture: "+err.Error())
+		e.abort(opOutcome(ctx), "start capture: "+err.Error())
 		return
 	}
 	e.mu.Lock()
 	e.seg.TStart, e.phase = e.now(), phasePolicy
+	e.statusFails, e.lastPoll = 0, e.now()
 	e.mu.Unlock()
 }
 
@@ -304,7 +355,7 @@ func (e *engine) abort(outcome, msg string) {
 	}
 	bg := context.Background()
 	if (ph == phaseStarting || ph == phasePolicy) && !execDone {
-		_, _ = call(bg, e.exec, map[string]interface{}{"command": "stop"}, e.timings.execStop)
+		_, _ = call(bg, e.exec, map[string]interface{}{"command": "stop"}, e.timings.call)
 	}
 	if ph == phaseCorrection && e.teleop != nil {
 		_, _ = call(bg, e.teleop, map[string]interface{}{"command": "stop"}, e.timings.call)
@@ -338,14 +389,14 @@ func (e *engine) takeOver(ctx context.Context) error {
 		return errors.New("take_over refused: needs a teleop dependency and teleop_safe_takeover: true")
 	}
 	if err := e.stopExecutorAndWait(ctx); err != nil {
-		e.abort("error", "stop executor: "+err.Error())
+		e.abort(opOutcome(ctx), "stop executor: "+err.Error())
 		return err
 	}
 	e.mu.Lock()
 	e.execStopped = true
 	e.mu.Unlock()
 	if _, err := call(ctx, e.capture, map[string]interface{}{"stop_capture": true}, e.timings.call); err != nil {
-		e.abort("error", "stop capture: "+err.Error())
+		e.abort(opOutcome(ctx), "stop capture: "+err.Error())
 		return err
 	}
 	e.mu.Lock()
@@ -363,14 +414,14 @@ func (e *engine) takeOver(ctx context.Context) error {
 			"source:correction", "checkpoint:" + sess.Checkpoint, fmt.Sprintf("fps:%g", sess.FPS)},
 	}, e.timings.call)
 	if err != nil {
-		e.abort("error", "start correction capture: "+err.Error())
+		e.abort(opOutcome(ctx), "start correction capture: "+err.Error())
 		return err
 	}
 	e.mu.Lock()
 	e.seg.TStart = e.now()
 	e.mu.Unlock()
 	if err := e.sleep(ctx, e.timings.hold); err != nil {
-		e.abort("error", "hold: "+err.Error())
+		e.abort(opOutcome(ctx), "hold: "+err.Error())
 		return err
 	}
 	// Enter correction before teleop starts so abort stops teleop if start half-succeeds.
@@ -378,7 +429,7 @@ func (e *engine) takeOver(ctx context.Context) error {
 	e.phase = phaseCorrection
 	e.mu.Unlock()
 	if _, err := call(ctx, e.teleop, map[string]interface{}{"command": "start"}, e.timings.call); err != nil {
-		e.abort("error", "start teleop: "+err.Error())
+		e.abort(opOutcome(ctx), "start teleop: "+err.Error())
 		return err
 	}
 	e.heartbeat()
@@ -401,15 +452,15 @@ func (e *engine) label(ctx context.Context, outcome string) error {
 	}
 	if ph == phaseCorrection {
 		if _, err := call(ctx, e.teleop, map[string]interface{}{"command": "stop"}, e.timings.call); err != nil {
-			e.abort("error", "stop teleop: "+err.Error())
+			e.abort(opOutcome(ctx), "stop teleop: "+err.Error())
 			return err
 		}
 	} else if err := e.stopExecutorAndWait(ctx); err != nil {
-		e.abort("error", "stop executor: "+err.Error())
+		e.abort(opOutcome(ctx), "stop executor: "+err.Error())
 		return err
 	}
 	if _, err := call(ctx, e.capture, map[string]interface{}{"stop_capture": true}, e.timings.call); err != nil {
-		e.abort("error", "stop capture: "+err.Error())
+		e.abort(opOutcome(ctx), "stop capture: "+err.Error())
 		return err
 	}
 	e.mu.Lock()
@@ -417,5 +468,24 @@ func (e *engine) label(ctx context.Context, outcome string) error {
 	e.capturing = false
 	e.finish(outcome, "")
 	e.phase = phaseIdle
+	return nil
+}
+
+// stop ends the session: it cancels any operation in flight (which aborts as
+// "stopped"), then aborts an open episode. Idempotent.
+func (e *engine) stop(ctx context.Context) error {
+	e.mu.Lock()
+	e.stopping = true
+	if e.opCancel != nil {
+		e.opCancel()
+	}
+	e.mu.Unlock()
+	e.opMu.Lock()
+	defer e.opMu.Unlock()
+	e.abort("stopped", "stopped by operator") // no-op unless an episode is open
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.stopping = false
+	e.sess, e.seg, e.phase, e.lastErr = nil, nil, phaseNoSession, ""
 	return nil
 }

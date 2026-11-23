@@ -519,3 +519,132 @@ func TestPolicyCaptureStartFailureStopsCapture(t *testing.T) {
 		t.Fatalf("capture %v", got)
 	}
 }
+
+func TestHeartbeatLossStopsPolicy(t *testing.T) {
+	r := newRig(t, true)
+	ctx := context.Background()
+	inPolicy(t, r)
+	r.clock.advance(2100 * time.Millisecond)
+	r.e.tick(ctx)
+	if r.e.status()["state"] != "idle" {
+		t.Fatal("heartbeat loss must stop the episode")
+	}
+	segs, _ := readSegments(r.e.logDir, "s1")
+	if segs[len(segs)-1].Outcome != "stopped" {
+		t.Fatalf("log %v", segs)
+	}
+	if got := r.exec.names(); got[len(got)-1] != "stop" {
+		t.Fatalf("executor %v", got)
+	}
+}
+
+func TestHeartbeatLossDuringStarting(t *testing.T) {
+	r := newRig(t, true)
+	ctx := context.Background()
+	startedSession(t, r)
+	_ = r.e.startEpisode(ctx)
+	r.clock.advance(2100 * time.Millisecond)
+	r.e.tick(ctx)
+	if r.e.status()["state"] != "idle" {
+		t.Fatal("heartbeat loss while starting must stop the executor")
+	}
+}
+
+func TestLastErrorWhileRunningIsTolerated(t *testing.T) {
+	r := newRig(t, true)
+	ctx := context.Background()
+	inPolicy(t, r)
+	// fake reports last_error "" by default; state running is what matters
+	r.clock.advance(1100 * time.Millisecond)
+	r.e.heartbeat()
+	r.e.tick(ctx)
+	if r.e.status()["state"] != "policy" {
+		t.Fatal("a running executor must keep the episode")
+	}
+	r.exec.set("error")
+	r.clock.advance(1100 * time.Millisecond)
+	r.e.heartbeat()
+	r.e.tick(ctx)
+	if r.e.status()["state"] != "idle" {
+		t.Fatal("state error must end the episode")
+	}
+}
+
+func TestStopPreemptsBlockedTakeover(t *testing.T) {
+	r := newRig(t, true)
+	ctx := context.Background()
+	inPolicy(t, r)
+	r.e.timings.execStop = 2 * time.Second // take_over's wait would run this long without pre-emption
+	r.e.timings.call = 50 * time.Millisecond
+	r.exec.block = make(chan struct{}) // executor stop hangs until its context ends
+	done := make(chan error, 1)
+	go func() { done <- r.e.takeOver(ctx) }()
+	time.Sleep(20 * time.Millisecond)
+	stopped := make(chan error, 1)
+	start := time.Now()
+	go func() { stopped <- r.e.stop(ctx) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("take_over must return once stop cancels it, well inside execStop")
+	}
+	close(r.exec.block) // let abort's best-effort stop finish
+	if err := <-stopped; err != nil {
+		t.Fatal(err)
+	}
+	if time.Since(start) > 1500*time.Millisecond {
+		t.Fatal("stop must pre-empt, not wait out execStop")
+	}
+	segs, _ := readSegments(r.e.logDir, "s1")
+	if len(segs) == 0 || segs[0].Outcome != "stopped" {
+		t.Fatalf("a pre-empted take_over must log the policy segment as stopped, got %v", segs)
+	}
+	if r.e.status()["state"] != "no_session" {
+		t.Fatal("stop ends the session")
+	}
+	if err := r.e.stop(ctx); err != nil {
+		t.Fatal("stop must be idempotent")
+	}
+}
+
+func TestHeartbeatsKeepSlowTakeoverAlive(t *testing.T) {
+	r := newRig(t, true)
+	ctx := context.Background()
+	inPolicy(t, r)
+	r.exec.block = make(chan struct{})
+	done := make(chan error, 1)
+	go func() { done <- r.e.takeOver(ctx) }()
+	for i := 0; i < 5; i++ { // 5 s of operator heartbeats while take_over is blocked
+		time.Sleep(5 * time.Millisecond)
+		r.clock.advance(time.Second)
+		r.e.heartbeat()
+		r.e.tick(ctx) // must neither abort nor block forever: it waits for opMu only to act
+	}
+	close(r.exec.block)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if r.e.status()["state"] != "correction" {
+		t.Fatal("heartbeats during a slow takeover must keep it alive")
+	}
+}
+
+func TestCallTimeoutStopsEverything(t *testing.T) {
+	r := newRig(t, true)
+	ctx := context.Background()
+	inPolicy(t, r)
+	r.e.timings.call = 30 * time.Millisecond
+	r.e.timings.execStop = 30 * time.Millisecond
+	r.capture.block = make(chan struct{}) // stop_capture hangs past call_timeout
+	if err := r.e.label(ctx, "success"); err == nil {
+		t.Fatal("a timed-out dependency call must fail the label")
+	}
+	close(r.capture.block)
+	if r.e.status()["state"] != "idle" {
+		t.Fatal("a call timeout must stop everything")
+	}
+	segs, _ := readSegments(r.e.logDir, "s1")
+	if segs[len(segs)-1].Outcome != "error" {
+		t.Fatalf("log %v", segs)
+	}
+}
