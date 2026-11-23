@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import * as r from './runner.ts';
 
 const seg = (session: string, episode: number, source: 'policy' | 'correction', outcome: r.Outcome): r.Segment => ({
-  session, episode, source, task: 't', checkpoint: 'c', t_start: '', t_end: '', outcome, error: '',
+  session, episode, source, task: 't', checkpoint: 'c', t_start: '', t_end: '', outcome, error: '', captured: outcome !== 'error',
 });
 
 test('asRunnerStatus accepts a runner reply, rejects executor, teleop and junk', () => {
@@ -40,4 +40,8 @@ test('needsHeartbeat and isIdle: unknown states are busy and need no heartbeat',
   for (const s of ['starting', 'policy', 'correction']) assert.ok(r.needsHeartbeat(s) && !r.isIdle(s));
   for (const s of ['idle', 'no_session']) assert.ok(r.isIdle(s) && !r.needsHeartbeat(s));
   assert.ok(!r.isIdle('weird') && !r.needsHeartbeat('weird'));
+});
+
+test('capturedCount counts only segments that started a capture', () => {
+  assert.equal(r.capturedCount([seg('s', 1, 'policy', 'success'), seg('s', 2, 'policy', 'error'), seg('s', 2, 'correction', 'success')]), 2);
 });

@@ -11,7 +11,7 @@ export type RunnerStatus = {
 };
 export type Segment = {
   session: string; episode: number; source: 'policy' | 'correction'; task: string; checkpoint: string;
-  t_start: string; t_end: string; outcome: Outcome; error: string;
+  t_start: string; t_end: string; outcome: Outcome; error: string; captured: boolean;
 };
 
 export function asRunnerStatus(r: unknown): RunnerStatus | undefined {
@@ -44,3 +44,6 @@ export function summary(segs: Segment[]) {
 export const needsHeartbeat = (state: string): boolean => state === 'starting' || state === 'policy' || state === 'correction';
 /** Only these allow home and a fresh episode; an unknown state string counts as busy. */
 export const isIdle = (state: string): boolean => state === 'idle' || state === 'no_session';
+
+/** Segments that started a capture: only these can have a synced sequence to review. */
+export const capturedCount = (segs: Segment[]): number => segs.filter((s) => s.captured).length;

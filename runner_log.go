@@ -19,6 +19,7 @@ type segment struct {
 	TEnd       time.Time `json:"t_end"`
 	Outcome    string    `json:"outcome"` // success | failure | takeover | error | stopped
 	Error      string    `json:"error"`
+	Captured   bool      `json:"captured"` // a start_capture was sent: a synced sequence may exist
 }
 
 func logPath(dir, session string) string { return filepath.Join(dir, session+".jsonl") }

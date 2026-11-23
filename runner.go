@@ -182,7 +182,7 @@ func (r *runner) DoCommand(ctx context.Context, cmd map[string]interface{}) (map
 			out[i] = map[string]interface{}{
 				"session": s.Session, "episode": s.Episode, "source": s.Source, "task": s.Task,
 				"checkpoint": s.Checkpoint, "t_start": s.TStart.Format(time.RFC3339Nano),
-				"t_end": s.TEnd.Format(time.RFC3339Nano), "outcome": s.Outcome, "error": s.Error,
+				"t_end": s.TEnd.Format(time.RFC3339Nano), "outcome": s.Outcome, "error": s.Error, "captured": s.Captured,
 			}
 		}
 		return map[string]interface{}{"segments": out}, nil

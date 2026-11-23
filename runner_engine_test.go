@@ -248,7 +248,7 @@ func TestLabelSuccessStopsExecutorThenCapture(t *testing.T) {
 		t.Fatalf("capture calls %v", got)
 	}
 	segs, _ := readSegments(r.e.logDir, "s1")
-	if len(segs) != 1 || segs[0].Outcome != "success" || segs[0].Source != "policy" {
+	if len(segs) != 1 || segs[0].Outcome != "success" || segs[0].Source != "policy" || !segs[0].Captured {
 		t.Fatalf("log %v", segs)
 	}
 	st := r.e.status()
@@ -265,7 +265,7 @@ func TestExecutorRefusesStart(t *testing.T) {
 		t.Fatal("expected the refusal")
 	}
 	segs, _ := readSegments(r.e.logDir, "s1")
-	if len(segs) != 1 || segs[0].Outcome != "error" || r.e.status()["state"] != "idle" {
+	if len(segs) != 1 || segs[0].Outcome != "error" || segs[0].Captured || r.e.status()["state"] != "idle" {
 		t.Fatalf("log %v", segs)
 	}
 }
@@ -439,7 +439,7 @@ func TestTakeoverOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	segs, _ := readSegments(r.e.logDir, "s1")
-	if len(segs) != 2 || segs[0].Outcome != "takeover" || segs[1].Source != "correction" || segs[1].Outcome != "success" {
+	if len(segs) != 2 || segs[0].Outcome != "takeover" || segs[1].Source != "correction" || segs[1].Outcome != "success" || !segs[0].Captured || !segs[1].Captured {
 		t.Fatalf("log %v", segs)
 	}
 	if got := r.teleop.names(); got[len(got)-1] != "stop" {

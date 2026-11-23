@@ -67,6 +67,7 @@
   let pollSeq = 0; // bumped by toggles and homes so an older in-flight status poll can't overwrite the newer state
   // Re-runs teleop discovery while none is found: no teleop means no teleop-off gate, so a slow start must not stick.
   let discoverTick = $state(0);
+  let runnerTick = $state(0); // same for runners, separate so neither retry re-probes for the other
 
   let savers = $state<string[]>([]);
   let homeSet = $state<string[]>(loadStrings('homeSet', []));
@@ -157,12 +158,13 @@
   $effect(() => {
     const client = robot.current;
     const names = generics.current.filter((r) => r.type === 'service').map((r) => r.name);
-    discoverTick;
+    runnerTick;
     if (!client || !connected || !generics.query?.isSuccess) return;
     probe(names, async (name) => {
       const r = await rb.withTimeout(new GenericServiceClient(client, name).doCommand({ command: 'status' }), rb.CALL_TIMEOUT_MS, name);
       return rn.asRunnerStatus(r) ? name : undefined;
-    }).then((found) => (runners = found));
+      // While a policy session is open a failed probe must not unmount it: only add.
+    }).then((found) => (runners = policy ? [...new Set([...runners, ...found])] : found));
   });
 
   // Discover arm-position-saver switches by their position labels.
@@ -361,7 +363,10 @@
     // Read-only, so it runs outside the driver. pollSeq drops results that a toggle or home has superseded.
     let polls = 0;
     const poll = setInterval(() => {
-      if ((!teleops.length || !runners.length) && connected && ++polls % 10 === 0) discoverTick++; // ponytail: 10 s retry until found
+      if (connected && ++polls % 10 === 0) {
+        if (!teleops.length) discoverTick++;
+        if (!runners.length) runnerTick++;
+      } // ponytail: 10 s retry until found
       const t = teleop;
       const seq = pollSeq;
       if (!t || !connected) return void (teleopStatus = undefined);

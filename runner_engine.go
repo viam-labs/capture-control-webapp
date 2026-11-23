@@ -315,6 +315,7 @@ func (e *engine) tick(ctx context.Context) {
 	}
 	// Set before the call: a timed-out start may still have begun recording, and abort must stop it.
 	e.capturing = true
+	e.seg.Captured = true
 	e.mu.Unlock()
 	_, err = call(ctx, e.capture, map[string]interface{}{
 		"start_capture": true, "frequency_hz": sess.FPS,
@@ -422,6 +423,7 @@ func (e *engine) takeOver(ctx context.Context) error {
 	e.seg = &segment{Session: sess.ID, Episode: sess.Episodes, Source: "correction",
 		Task: sess.Task, Checkpoint: sess.Checkpoint, TStart: e.now()}
 	e.capturing = true // before the call: a timed-out start may still be recording
+	e.seg.Captured = true
 	e.mu.Unlock()
 
 	_, err := call(ctx, e.capture, map[string]interface{}{

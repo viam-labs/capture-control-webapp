@@ -15,14 +15,17 @@
 
   const msg = (e: unknown) => (e instanceof Error ? e.message : String(e));
   const client = $derived(new GenericServiceClient(robot, runner));
-  const call = (command: string, extra: Record<string, unknown> = {}) =>
-    rb.withTimeout(client.doCommand({ command, ...extra }), rb.CALL_TIMEOUT_MS, `Runner ${command}`);
+  // Commands that start or stop hardware can take a while (executor stop waits up to 15 s); reads stay short.
+  const LONG_MS = 20_000;
+  const call = (command: string, extra: Record<string, unknown> = {}, ms = rb.CALL_TIMEOUT_MS) =>
+    rb.withTimeout(client.doCommand({ command, ...extra }), ms, `Runner ${command}`);
 
   let task = $state(untrack(() => activeTask));
   let checkpoint = $state(((): string => { try { return JSON.parse(localStorage.getItem('policyCheckpoint') ?? '""') ?? ''; } catch { return ''; } })());
   let fps = $state(untrack(() => defaultFps));
   let st = $state.raw<rn.RunnerStatus | undefined>();
-  let error = $state('');
+  let error = $state(''); // last command failure
+  let linkError = $state(''); // poll or heartbeat failure; cleared by the next good status
   let homing = $state(false);
   let showKeys = $state(false);
   let now = $state(Date.now());
@@ -34,28 +37,41 @@
   const phase = $derived(st?.state ?? '');
   const idle = $derived(rn.isIdle(phase));
   const counts = $derived(st?.session?.counts ?? {});
+  const tally = (o: string) => counts[`policy:${o}`] ?? 0;
   const sum = $derived(ended ? rn.summary(ended.segs) : undefined);
   const elapsed = $derived(st?.episode ? Math.max(0, Math.floor((now - st.episode.started) / 1000)) : 0);
   const cols = $derived(cameraNames.length <= 1 ? 1 : cameraNames.length <= 4 ? 2 : 3);
   const pct = (n: number) => `${Math.round(n * 100)}%`;
   const fmt = (t: number) => `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`;
 
+  let seq = 0, applied = 0; // out-of-order status replies must not roll the state back
   async function refresh() {
+    const mine = ++seq;
     try {
       const s = rn.asRunnerStatus(await call('status'));
       if (!s) throw new Error(`${runner} did not answer like an episode runner`);
+      if (mine < applied) return;
+      applied = mine;
       st = s;
+      linkError = '';
       if (s.session) lastId = s.session.id;
     } catch (e) {
-      error = msg(e);
+      if (mine >= applied) linkError = msg(e);
     }
   }
+  let inFlight = false; // fast double presses must not send duplicates; stop is exempt
   async function act(command: string, extra?: Record<string, unknown>) {
+    if (command !== 'stop') {
+      if (inFlight) return;
+      inFlight = true;
+    }
     try {
-      await call(command, extra);
+      await call(command, extra, LONG_MS);
       error = '';
     } catch (e) {
       error = `${command} failed: ${msg(e)}`;
+    } finally {
+      if (command !== 'stop') inFlight = false;
     }
     await refresh();
   }
@@ -64,23 +80,31 @@
     e.preventDefault();
     try { localStorage.setItem('policyCheckpoint', JSON.stringify(checkpoint)); } catch {}
     ended = undefined;
+    lastId = '';
     await act('start_session', { task, checkpoint, fps });
   }
 
   async function endSession() {
+    if (ending) return;
     const id = st?.session?.id ?? lastId;
     ending = true;
     try {
-      await call('stop');
+      await call('stop', {}, LONG_MS); // the log is read only after stop has really finished
+      error = '';
     } catch (e) {
       error = `stop failed: ${msg(e)}`;
     }
-    try {
-      const r = (await call('log', { session: id })) as { segments?: rn.Segment[] };
-      ended = { id, segs: r.segments ?? [], error: '' };
-    } catch (e) {
-      ended = { id, segs: [], error: `Could not read the session log: ${msg(e)}` };
+    if (!id) {
+      ended = { id, segs: [], error: 'No session to summarize' };
+    } else {
+      try {
+        const r = (await call('log', { session: id })) as { segments?: rn.Segment[] };
+        ended = { id, segs: r.segments ?? [], error: '' };
+      } catch (e) {
+        ended = { id, segs: [], error: `Could not read the session log: ${msg(e)}` };
+      }
     }
+    lastId = '';
     ending = false;
     await refresh();
   }
@@ -97,8 +121,11 @@
     if (e.target instanceof Element && e.target.closest('input, select, textarea')) return;
     const k = e.key.toLowerCase();
     if (e.key === '?') showKeys = !showKeys;
-    else if (e.key === 'Escape') { if (showKeys) showKeys = false; else if (st?.session) void endSession(); }
-    else if (showKeys) return;
+    else if (e.key === 'Escape') {
+      showKeys = false;
+      // An unknown status or any non-idle state may mean the robot is moving: always stop.
+      if (!st || !idle || st.session) void endSession();
+    } else if (showKeys) return;
     else if (e.code === 'Space') {
       e.preventDefault();
       if (phase === 'idle') void act('start_episode');
@@ -110,17 +137,35 @@
   }
 
   onMount(() => {
-    void refresh();
-    const timer = setInterval(() => {
+    // Status poll: next poll starts after the previous one settles.
+    let poll: ReturnType<typeof setTimeout>;
+    const loop = async () => {
       now = Date.now();
-      if (st && rn.needsHeartbeat(st.state)) call('heartbeat').catch((e) => (error = `heartbeat failed: ${msg(e)}`));
-      void refresh();
-    }, 500);
+      await refresh();
+      poll = setTimeout(loop, 500);
+    };
+    void loop();
+    // Heartbeat ticks come from a worker: browsers throttle main-thread timers in background tabs.
+    const beat = () => {
+      if (st && rn.needsHeartbeat(st.state)) call('heartbeat').catch((e) => (linkError = `heartbeat failed: ${msg(e)}`));
+    };
+    let worker: Worker | undefined;
+    let fallback: ReturnType<typeof setInterval> | undefined;
+    try {
+      const url = URL.createObjectURL(new Blob(['setInterval(() => postMessage(0), 500)'], { type: 'text/javascript' }));
+      worker = new Worker(url);
+      URL.revokeObjectURL(url);
+      worker.onmessage = beat;
+    } catch {
+      fallback = setInterval(beat, 500); // ponytail: throttled in background tabs; only if workers are blocked
+    }
     // Best effort: leaving with an episode running must not leave the arm going.
     const bye = () => { if (st?.episode) client.doCommand({ command: 'stop' }).catch(() => {}); };
     addEventListener('pagehide', bye);
     return () => {
-      clearInterval(timer);
+      clearTimeout(poll);
+      worker?.terminate();
+      clearInterval(fallback);
       removeEventListener('pagehide', bye);
       bye();
     };
@@ -131,7 +176,7 @@
 
 <div class="ps" class:reviewing>
   {#if reviewing && ended}
-    <Review {robot} session={{ id: ended.id, expected: ended.segs.length }} onclose={() => (reviewing = false)} />
+    <Review {robot} session={{ id: ended.id, expected: rn.capturedCount(ended.segs) }} onclose={() => (reviewing = false)} />
   {:else}
     <section class="cams {phase}" style="--cols: {cols}">
       {#each cameraNames as name (name)}<CameraFeed {partID} {name} />{:else}<p class="empty">No cameras.</p>{/each}
@@ -145,6 +190,8 @@
 
     <section class="drawer">
       {#if error}<p class="banner error" role="alert">{error}</p>{/if}
+      {#if linkError}<p class="banner error" role="alert">{linkError}</p>{/if}
+      {#if st?.episode}<p class="banner warn">Keep this tab open and visible: a closed or suspended tab stops the robot.</p>{/if}
       {#if st?.last_error}<p class="banner warn" role="alert">{st.last_error}</p>{/if}
 
       {#if !st}
@@ -159,7 +206,7 @@
           </p>
         {/if}
         <div class="row">
-          <button type="button" disabled={ended.segs.length === 0} onclick={() => (reviewing = true)}>Review session</button>
+          <button type="button" disabled={rn.capturedCount(ended.segs) === 0} onclick={() => (reviewing = true)}>Review session</button>
           <button type="button" onclick={() => (ended = undefined)}>New session</button>
           <button type="button" onclick={onclose}>Back to recorder</button>
         </div>
@@ -181,7 +228,7 @@
           <strong aria-live="polite">{phase === 'starting' ? 'Loading policy…' : phase}</strong>
           <span>Episode {st.episode?.id ?? st.session.episodes}{st.episode ? ` · ${st.episode.source}` : ''} · {fmt(elapsed)}</span>
           <span>task:{st.session.task} · {st.session.checkpoint}</span>
-          <span>{counts.success ?? 0} success · {counts.failure ?? 0} failure · {counts.takeover ?? 0} takeover</span>
+          <span>{tally('success')} success · {tally('failure')} failure · {tally('takeover')} takeover</span>
         </div>
         <div class="row">
           <button type="button" disabled={phase !== 'idle'} onclick={(e) => { void act('start_episode'); e.currentTarget.blur(); }}>Start episode <kbd>Space</kbd></button>
