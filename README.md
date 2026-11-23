@@ -66,6 +66,66 @@ When a session ends, **Review session** lists that session's episodes as they sy
 
 Review reads and tags data with the machine's own credentials. A sequence can appear before all its frames have synced. Keep and Discard unlock once the frames have caught up, or once no new frames arrive for 15 s, in which case the episode is marked partial.
 
+## Episode runner
+
+The second model in this module, `viam-labs:capture-control:episode-runner`, runs learned-policy episodes on a physical robot. The operator labels each run success or failure, can take over with teleop when the policy goes wrong (the correction is captured), and every rollout and correction lands in Viam data as a tagged sequence. The web app's **Policy session** screen (offered on the start screen when a runner is configured) is its operator UI.
+
+```json
+{
+  "name": "episode-runner",
+  "api": "rdk:service:generic",
+  "model": "viam-labs:capture-control:episode-runner",
+  "attributes": {
+    "executor": "vla-controller",
+    "teleop": "so101-teleop",
+    "capture_sensor": "demo-capture",
+    "heartbeat_timeout_ms": 2000,
+    "takeover_hold_ms": 500,
+    "call_timeout_ms": 5000,
+    "status_timeout_ms": 1000,
+    "executor_stop_timeout_ms": 15000,
+    "policy_start_timeout_ms": 120000,
+    "teleop_safe_takeover": true
+  }
+}
+```
+
+`executor` and `capture_sensor` are required dependencies; `teleop` is optional (without it `take_over` is refused; episodes and labels still work). `status_timeout_ms` bounds each executor status read; 3 consecutive failed reads stop everything.
+
+**`teleop_safe_takeover` defaults to `false`.** Teleop must start from the follower's current pose (no jump to the leader). Until you set it `true` for a teleop device that passed that pose check, `take_over` is refused. Result for `devrel:so101:teleop`: pending verification.
+
+### Dependency contracts
+
+| Role | Command | Reply the runner reads |
+|---|---|---|
+| Executor (`viam-labs:vla:controller`) | `{"command":"start","task":"<text>"}`, `{"command":"stop"}`, `{"command":"status"}` | `state` (`waiting_for_policy`, `running`, `error`, `stopped`, `idle`), `last_error` |
+| Teleop (`devrel:so101:teleop`) | `{"command":"start"}`, `{"command":"stop"}`, `{"command":"status"}` | `running` (bool), `last_error` |
+| Capture (`viam:capture-control:capture-control-sensor`) | `{"start_capture":true,"frequency_hz":<fps>,"tags":[...]}`, `{"stop_capture":true}` | none |
+
+Only the executor's `state` decides failure: `last_error` while `running` is logged, not acted on.
+
+### Policy session keys
+
+| Key | Action |
+|---|---|
+| Space | Start the next policy episode |
+| S / F | Success / failure for the current policy run or correction |
+| T | Take over (policy state only) |
+| H | Home (runner idle only) |
+| Esc | Stop |
+
+### Tags and the session log
+
+Each capture is tagged `task:`, `session:`, `episode:`, `source:` (`policy` or `correction`), `checkpoint:` and `fps:`. Outcomes can't be capture tags, so the runner appends one JSON line per segment to `$VIAM_MODULE_DATA/episode-runner/<session>.jsonl` (`outcome` is `success`, `failure`, `takeover`, `error` or `stopped`). When you open **Review session**, the app reads that log and applies `outcome:<outcome>` to each synced sequence, matched by its `session:`, `episode:` and `source:` tags. Episodes can be filtered by source and outcome.
+
+### Safety
+
+- **Heartbeat**: while the runner is starting (including a cold policy load), running a policy or in a correction, the app sends a heartbeat about every 500 ms. A gap of `heartbeat_timeout_ms` stops the executor, teleop and capture and logs the segment `stopped`. Keep the Policy session tab visible: browsers throttle background tabs.
+- **Executor errors**: `state: error`, or `stopped`/`idle` while a run is expected, ends the episode with `outcome: error`. A policy that never reaches `running` within `policy_start_timeout_ms` is stopped.
+- **Dependency timeouts** stop everything, except executor status reads (3 consecutive failures).
+- **Executor stop is never cut short**: it is sent on a context that operator stop and cancellation can't cancel, and may take up to `executor_stop_timeout_ms`.
+- **Esc** stops everything and ends the session. Reconfigure and close stop everything first.
+
 ## Develop
 
 Requires Go and Node 22.18+ (tests use Node's built-in TypeScript support).

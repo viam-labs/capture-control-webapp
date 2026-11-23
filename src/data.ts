@@ -3,6 +3,7 @@
 import { createViamClient, type Credentials, type RobotClient, type Sequence, type ViamClient } from '@viamrobotics/sdk';
 import { getHostAndCredentials } from './auth.js';
 import { withReview, type Frame, type Review } from './review.ts';
+import { withOutcome, type Outcome } from './runner.ts';
 
 export type Ids = { orgId: string; partId: string };
 
@@ -78,6 +79,14 @@ export async function frameBytes(frames: Frame[]): Promise<Map<string, Blob>> {
 export async function setReview(seqId: string, state: Review): Promise<string[]> {
   const data = (await client()).dataClient;
   const tags = withReview((await data.getSequence(seqId)).sequenceTags, state);
+  await data.updateSequence(seqId, undefined, tags, undefined, undefined, { paths: ['sequence_tags'] });
+  return tags;
+}
+
+/** Same as setReview, for the outcome tag. */
+export async function setOutcome(seqId: string, outcome: Outcome): Promise<string[]> {
+  const data = (await client()).dataClient;
+  const tags = withOutcome((await data.getSequence(seqId)).sequenceTags, outcome);
   await data.updateSequence(seqId, undefined, tags, undefined, undefined, { paths: ['sequence_tags'] });
   return tags;
 }

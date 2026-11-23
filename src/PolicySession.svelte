@@ -178,7 +178,7 @@
 
 <div class="ps" class:reviewing>
   {#if reviewing && ended}
-    <Review {robot} session={{ id: ended.id, expected: rn.capturedCount(ended.segs) }} onclose={() => (reviewing = false)} />
+    <Review {robot} session={{ id: ended.id, expected: rn.capturedCount(ended.segs), runner }} onclose={() => (reviewing = false)} />
   {:else}
     <section class="cams {phase}" style="--cols: {cols}">
       {#each cameraNames as name (name)}<CameraFeed {partID} {name} />{:else}<p class="empty">No cameras.</p>{/each}

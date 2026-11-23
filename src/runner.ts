@@ -47,3 +47,12 @@ export const isIdle = (state: string): boolean => state === 'idle' || state === 
 
 /** Segments that started a capture: only these can have a synced sequence to review. */
 export const capturedCount = (segs: Segment[]): number => segs.filter((s) => s.captured).length;
+
+/** Sequences whose outcome tag differs from the log's and that we haven't already written (`written` holds `id:outcome`). */
+export function pendingOutcomes(seqs: { id: string; tags: string[] }[], segs: Segment[], written: Set<string>): { id: string; outcome: Outcome }[] {
+  return seqs.flatMap((s) => {
+    const outcome = outcomeFor(s.tags, segs);
+    const has = s.tags.includes(`outcome:${outcome}`);
+    return outcome && !has && !written.has(`${s.id}:${outcome}`) ? [{ id: s.id, outcome }] : [];
+  });
+}
