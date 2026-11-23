@@ -78,6 +78,7 @@
   let segs = $state.raw<rn.Segment[] | undefined>();
   const written = new Set<string>(); // `id:outcome` we already wrote: never re-tag
   let applying = false;
+  let tagRetries = 0;
   $effect(() => {
     retry;
     const r = session?.runner;
@@ -101,10 +102,12 @@
         try {
           const tags = await data.setOutcome(id, outcome);
           written.add(`${id}:${outcome}`);
+          tagRetries = 0;
           localTags = { ...localTags, [id]: tags };
         } catch (e) {
           error = `Outcome tagging failed: ${msg(e)}`;
-          ok = false; // no immediate retry loop: the queue re-polls every 5 s until all expected episodes are listed, which retries tagging
+          ok = false; // no immediate retry loop; retry every 5 s, up to 1 min (the queue's own re-poll stops once all expected episodes are listed)
+          if (tagRetries++ < 12) setTimeout(() => { episodes = [...episodes]; }, 5000);
           break;
         }
       }

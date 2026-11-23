@@ -107,7 +107,7 @@
   const canStart = $derived(!!sensor && !orphaned && !!activeTask && !homing);
   const episodesDone = $derived(session ? Object.values(session.counts).reduce((a, b) => a + b, 0) : 0);
   const canReview = $derived(connected && !!robot.current && !active && !homing);
-  const canPolicy = $derived(connected && runners.length === 1 && !active && !homing && !reviewing);
+  const canPolicy = $derived(connected && runners.length === 1 && !active && !homing && !reviewing && teleopMode !== 'on');
   // PolicySession's H: same path as doHome, but the runner (not a recording session) gates it.
   const canHomePolicy = $derived(connected && homeSavers.length > 0 && teleops.length <= 1);
   async function homePolicy() {
@@ -522,7 +522,7 @@
         {/if}
         <button type="button" disabled={!canReview} onclick={(e) => { openReview(false); e.currentTarget.blur(); }}>Episodes</button>
         {#if runners.length === 1}
-          <button type="button" disabled={!canPolicy} onclick={(e) => { policy = true; e.currentTarget.blur(); }}>Policy session</button>
+          <button type="button" disabled={!canPolicy} title={teleopMode === 'on' ? 'Turn teleop off first: the leader must not mirror while a policy drives the follower' : ''} onclick={(e) => { policy = true; e.currentTarget.blur(); }}>Policy session</button>
         {/if}
       </div>
       {@render palette()}

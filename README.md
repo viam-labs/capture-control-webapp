@@ -92,7 +92,13 @@ The second model in this module, `viam-labs:capture-control:episode-runner`, run
 
 `executor` and `capture_sensor` are required dependencies; `teleop` is optional (without it `take_over` is refused; episodes and labels still work). `status_timeout_ms` bounds each executor status read; 3 consecutive failed reads stop everything.
 
-**`teleop_safe_takeover` defaults to `false`.** Teleop must start from the follower's current pose (no jump to the leader). Until you set it `true` for a teleop device that passed that pose check, `take_over` is refused. Set it `true` only for a device that passed the pose check. Result for `devrel:so101:teleop`: pending verification.
+**`teleop_safe_takeover` defaults to `false`.** Teleop must start from the follower's current pose (no jump to the leader). Until you set it `true` for a teleop device that passed that pose check, `take_over` is refused. Set it `true` only for a device that passed the pose check. **SO-101: keep it `false` for now.** The upstream `devrel:so101:teleop` docs say "the follower will travel to meet the leader as soon as the loop starts", so the current release does not meet the takeover contract. Leave `teleop_safe_takeover: false` until the teleop module syncs the leader to the follower first (a hardware check is still recommended).
+
+**Teleop and policy runs.** When the runner has a `teleop` dependency, `start_episode` first sends it `stop`, so the leader never mirrors while the policy drives the follower (a failed stop refuses the episode). With no teleop configured in the runner, turn teleop off before a policy session (the Policy session button is disabled while teleop is on).
+
+The runner sets `captured` on a segment before `start_capture` is sent, so a refused capture start can leave Review waiting for one sequence that never syncs.
+
+Status reads in the wait after `executor.stop` use `call_timeout_ms` each; the wait as a whole is bounded by `executor_stop_timeout_ms`.
 
 ### Dependency contracts
 

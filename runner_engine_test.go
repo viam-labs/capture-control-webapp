@@ -429,7 +429,7 @@ func TestTakeoverOrder(t *testing.T) {
 	if len(slept) == 0 || slept[len(slept)-1] != 500*time.Millisecond {
 		t.Fatalf("hold %v", slept)
 	}
-	if got := r.teleop.names(); len(got) != 1 || got[0] != "start" {
+	if got := r.teleop.names(); len(got) != 2 || got[1] != "start" {
 		t.Fatalf("teleop %v", got)
 	}
 	if r.e.status()["state"] != "correction" {
@@ -453,10 +453,11 @@ func TestTakeoverOrder(t *testing.T) {
 func refusedTakeover(t *testing.T, r *rig) {
 	t.Helper()
 	inPolicy(t, r)
+	before := len(r.teleop.names())
 	if err := r.e.takeOver(context.Background()); err == nil {
 		t.Fatal("take_over must be refused")
 	}
-	if r.e.status()["state"] != "policy" || len(r.teleop.names()) != 0 {
+	if r.e.status()["state"] != "policy" || len(r.teleop.names()) != before {
 		t.Fatal("a refused take_over must change nothing")
 	}
 }
@@ -701,5 +702,34 @@ func TestCallTimeoutStopsEverything(t *testing.T) {
 	segs, _ := readSegments(r.e.logDir, "s1")
 	if segs[len(segs)-1].Outcome != "error" {
 		t.Fatalf("log %v", segs)
+	}
+}
+
+func TestStartEpisodeStopsTeleopFirst(t *testing.T) {
+	r := newRig(t, true)
+	startedSession(t, r)
+	if err := r.e.startEpisode(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.teleop.names(); len(got) != 1 || got[0] != "stop" {
+		t.Fatalf("teleop %v", got)
+	}
+	if got := r.exec.names(); len(got) != 1 || got[0] != "start" {
+		t.Fatalf("executor %v", got)
+	}
+}
+
+func TestTeleopStopFailureRefusesEpisode(t *testing.T) {
+	r := newRig(t, true)
+	r.teleop.failOn = "stop"
+	startedSession(t, r)
+	if err := r.e.startEpisode(context.Background()); err == nil {
+		t.Fatal("expected the refusal")
+	}
+	if got := r.exec.names(); len(got) != 0 {
+		t.Fatalf("executor must not be touched: %v", got)
+	}
+	if r.e.status()["state"] != "idle" {
+		t.Fatal("must stay idle")
 	}
 }

@@ -48,7 +48,7 @@ during a policy session; the web app is its operator UI.
 }
 ```
 
-`teleop_safe_takeover` is set `true` only for a teleop device that passed the pose check (SO-101: pending verification).
+`teleop_safe_takeover` is set `true` only for a teleop device that passed the pose check (SO-101: keep `false`: the upstream `devrel:so101:teleop` docs say "the follower will travel to meet the leader as soon as the loop starts", so the current release does not meet the contract until the teleop module syncs the leader to the follower first).
 
 `executor` and `capture_sensor` are required dependencies; `teleop` is optional. Without it `take_over` is refused,
 and policy episodes and labels still work.

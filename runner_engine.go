@@ -185,6 +185,15 @@ func (e *engine) startEpisode(ctx context.Context) error {
 		defer e.mu.Unlock()
 		return fmt.Errorf("start_episode not allowed in %s", e.phase)
 	}
+	e.mu.Unlock()
+	// The leader must never mirror while the policy drives the follower: stop teleop first
+	// (idempotent). opMu serialises operations, so the phase cannot change meanwhile.
+	if e.teleop != nil {
+		if _, err := call(ctx, e.teleop, map[string]interface{}{"command": "stop"}, e.timings.call); err != nil {
+			return fmt.Errorf("stop teleop before policy run: %w", err)
+		}
+	}
+	e.mu.Lock()
 	e.sess.Episodes++
 	e.execStopped = false
 	e.seg = &segment{Session: e.sess.ID, Episode: e.sess.Episodes, Source: "policy",
@@ -339,6 +348,9 @@ func (e *engine) stopExecutorAndWait(ctx context.Context) error {
 	if _, err := call(context.WithoutCancel(ctx), e.exec, map[string]interface{}{"command": "stop"}, e.timings.execStop); err != nil {
 		return err
 	}
+	e.mu.Lock()
+	e.execStopped = true // the stop landed, even if the op was cancelled: abort need not resend
+	e.mu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return err
 	}

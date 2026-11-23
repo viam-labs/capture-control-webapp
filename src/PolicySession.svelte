@@ -16,7 +16,7 @@
   const msg = (e: unknown) => (e instanceof Error ? e.message : String(e));
   const client = $derived(new GenericServiceClient(robot, runner));
   // Commands that start or stop hardware can take a while (executor stop waits up to 15 s); reads stay short.
-  const LONG_MS = 20_000;
+  const LONG_MS = 40_000; // above executor stop + call timeout + margin
   const call = (command: string, extra: Record<string, unknown> = {}, ms = rb.CALL_TIMEOUT_MS) =>
     rb.withTimeout(client.doCommand({ command, ...extra }), ms, `Runner ${command}`);
 
@@ -94,6 +94,15 @@
     } catch (e) {
       error = `stop failed: ${msg(e)}`;
     }
+    // stop may have timed out client-side while the runner is still finishing: wait for it to
+    // close the final segment before reading the log.
+    for (const end = Date.now() + LONG_MS; Date.now() < end; ) {
+      try {
+        const s = (await call('status', {}, 5_000)) as { state?: string };
+        if (s.state === 'no_session') break;
+      } catch { /* keep polling until the deadline */ }
+      await new Promise((r) => setTimeout(r, 500));
+    }
     if (!id) {
       ended = { id, segs: [], error: 'No session to summarize' };
     } else {
@@ -157,6 +166,7 @@
       worker = new Worker(url);
       URL.revokeObjectURL(url);
       worker.onmessage = beat;
+      worker.onerror = () => { fallback ??= setInterval(beat, 500); }; // e.g. CSP blocks blob workers
     } catch {
       fallback = setInterval(beat, 500); // ponytail: throttled in background tabs; only if workers are blocked
     }
