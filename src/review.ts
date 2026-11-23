@@ -1,13 +1,26 @@
 // Episode-review helpers. Pure: no Svelte or SDK imports. Frame times are epoch ms.
+import type { Outcome } from './runner.ts';
 
 export type Review = 'keep' | 'discard';
 export type Frame = { id: string; camera: string; mime: string; time: number };
 export type Timeline = Map<string, Frame[]>;
 
-export function parseTags(tags: string[]): { task?: string; session?: string; review?: Review } {
+const OUTCOMES: Outcome[] = ['success', 'failure', 'takeover', 'error', 'stopped'];
+
+export function parseTags(tags: string[]): {
+  task?: string; session?: string; review?: Review; source?: 'policy' | 'correction'; outcome?: Outcome; checkpoint?: string; episode?: number;
+} {
   const get = (key: string) => tags.find((t) => t.startsWith(`${key}:`))?.slice(key.length + 1);
-  const review = get('review');
-  return { task: get('task'), session: get('session'), review: review === 'keep' || review === 'discard' ? review : undefined };
+  const review = get('review'), source = get('source'), outcome = get('outcome'), episode = get('episode');
+  return {
+    task: get('task'),
+    session: get('session'),
+    review: review === 'keep' || review === 'discard' ? review : undefined,
+    source: source === 'policy' || source === 'correction' ? source : undefined,
+    outcome: OUTCOMES.find((o) => o === outcome),
+    checkpoint: get('checkpoint'),
+    episode: episode !== undefined && episode !== '' && Number.isInteger(Number(episode)) ? Number(episode) : undefined,
+  };
 }
 
 export const withReview = (tags: string[], state: Review): string[] => [
