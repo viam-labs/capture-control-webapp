@@ -497,3 +497,19 @@ func (e *engine) stop(ctx context.Context) error {
 	e.sess, e.seg, e.phase, e.lastErr = nil, nil, phaseNoSession, ""
 	return nil
 }
+
+// log returns the segments of the named session, or of the current one when
+// session is empty. With neither, the list is empty.
+func (e *engine) log(session string) ([]segment, error) {
+	if session == "" {
+		e.mu.Lock()
+		if e.sess != nil {
+			session = e.sess.ID
+		}
+		e.mu.Unlock()
+	}
+	if session == "" {
+		return []segment{}, nil
+	}
+	return readSegments(e.logDir, session)
+}

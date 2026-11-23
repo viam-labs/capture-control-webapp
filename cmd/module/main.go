@@ -8,5 +8,8 @@ import (
 )
 
 func main() {
-	module.ModularMain(resource.APIModel{API: generic.API, Model: capturecontrolwebapp.Model})
+	module.ModularMain(
+		resource.APIModel{API: generic.API, Model: capturecontrolwebapp.Model},
+		resource.APIModel{API: generic.API, Model: capturecontrolwebapp.RunnerModel},
+	)
 }

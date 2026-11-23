@@ -8,6 +8,12 @@
     {
       "api": "rdk:service:generic",
       "model": "viam-labs:capture-control:webapp"
+    },
+    {
+      "api": "rdk:service:generic",
+      "model": "viam-labs:capture-control:episode-runner",
+      "markdown_link": "README.md#episode-runner",
+      "short_description": "Runs policy episodes with outcome labels and human takeover"
     }
   ],
   "applications": [
