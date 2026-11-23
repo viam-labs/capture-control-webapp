@@ -1,4 +1,5 @@
 // Episode-runner helpers. Pure: no Svelte or SDK imports.
+import { parseTags } from './review.ts';
 
 export type RunnerState = 'no_session' | 'idle' | 'starting' | 'policy' | 'correction';
 export type Outcome = 'success' | 'failure' | 'takeover' | 'error' | 'stopped';
@@ -21,8 +22,7 @@ export function asRunnerStatus(r: unknown): RunnerStatus | undefined {
 
 /** The outcome for a synced sequence, matched by its session, episode and source tags; undefined if not in the log. */
 export function outcomeFor(tags: string[], segs: Segment[]): Outcome | undefined {
-  const get = (k: string) => tags.find((t) => t.startsWith(`${k}:`))?.slice(k.length + 1);
-  const session = get('session'), episode = Number(get('episode')), source = get('source');
+  const { session, episode, source } = parseTags(tags);
   return segs.find((s) => s.session === session && s.episode === episode && s.source === source)?.outcome;
 }
 
@@ -48,11 +48,11 @@ export const isIdle = (state: string): boolean => state === 'idle' || state === 
 /** Segments that started a capture: only these can have a synced sequence to review. */
 export const capturedCount = (segs: Segment[]): number => segs.filter((s) => s.captured).length;
 
-/** Sequences whose outcome tag differs from the log's and that we haven't already written (`written` holds `id:outcome`). */
-export function pendingOutcomes(seqs: { id: string; tags: string[] }[], segs: Segment[], written: Set<string>): { id: string; outcome: Outcome }[] {
+/** Sequences whose outcome tag differs from the log's. */
+export function pendingOutcomes(seqs: { id: string; tags: string[] }[], segs: Segment[]): { id: string; outcome: Outcome }[] {
   return seqs.flatMap((s) => {
     const outcome = outcomeFor(s.tags, segs);
     const has = s.tags.includes(`outcome:${outcome}`);
-    return outcome && !has && !written.has(`${s.id}:${outcome}`) ? [{ id: s.id, outcome }] : [];
+    return outcome && !has ? [{ id: s.id, outcome }] : [];
   });
 }

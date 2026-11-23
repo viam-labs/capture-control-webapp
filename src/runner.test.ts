@@ -46,7 +46,7 @@ test('capturedCount counts only segments that started a capture', () => {
   assert.equal(r.capturedCount([seg('s', 1, 'policy', 'success'), seg('s', 2, 'policy', 'error'), seg('s', 2, 'correction', 'success')]), 2);
 });
 
-test('pendingOutcomes skips tagged, unmatched and already-written sequences', () => {
+test('pendingOutcomes skips tagged and unmatched sequences', () => {
   const segs = [seg('s', 1, 'policy', 'takeover'), seg('s', 1, 'correction', 'success'), seg('s', 2, 'policy', 'failure')];
   const tags = (e: number, src: string, extra: string[] = []) => [`session:s`, `episode:${e}`, `source:${src}`, ...extra];
   const seqs = [
@@ -54,9 +54,8 @@ test('pendingOutcomes skips tagged, unmatched and already-written sequences', ()
     { id: 'b', tags: tags(1, 'correction', ['outcome:success']) }, // already right
     { id: 'c', tags: tags(2, 'policy', ['outcome:success']) }, // wrong: replaced
     { id: 'd', tags: tags(9, 'policy') }, // not in the log
-    { id: 'e', tags: tags(2, 'policy') }, // written already
   ];
-  assert.deepEqual(r.pendingOutcomes(seqs, segs, new Set(['e:failure'])), [
+  assert.deepEqual(r.pendingOutcomes(seqs, segs), [
     { id: 'a', outcome: 'takeover' },
     { id: 'c', outcome: 'failure' },
   ]);

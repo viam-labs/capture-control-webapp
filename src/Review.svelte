@@ -76,7 +76,6 @@
 
   // ---- Outcome tags from the runner's log ----
   let segs = $state.raw<rn.Segment[] | undefined>();
-  const written = new Set<string>(); // `id:outcome` we already wrote: never re-tag
   let applying = false;
   let tagRetries = 0;
   $effect(() => {
@@ -93,7 +92,7 @@
     const log = segs;
     const eps = episodes;
     if (!log || applying) return;
-    const todo = untrack(() => rn.pendingOutcomes(eps.map((s) => ({ id: s.id, tags: tagsOf(s) })), log, written));
+    const todo = untrack(() => rn.pendingOutcomes(eps.map((s) => ({ id: s.id, tags: tagsOf(s) })), log));
     if (!todo.length) return;
     applying = true;
     let ok = true;
@@ -101,7 +100,6 @@
       for (const { id, outcome } of todo) {
         try {
           const tags = await data.setOutcome(id, outcome);
-          written.add(`${id}:${outcome}`);
           tagRetries = 0;
           localTags = { ...localTags, [id]: tags };
         } catch (e) {

@@ -8,7 +8,7 @@ export type Timeline = Map<string, Frame[]>;
 const OUTCOMES: Outcome[] = ['success', 'failure', 'takeover', 'error', 'stopped'];
 
 export function parseTags(tags: string[]): {
-  task?: string; session?: string; review?: Review; source?: 'policy' | 'correction'; outcome?: Outcome; checkpoint?: string; episode?: number;
+  task?: string; session?: string; review?: Review; source?: 'policy' | 'correction'; outcome?: Outcome; episode?: number;
 } {
   const get = (key: string) => tags.find((t) => t.startsWith(`${key}:`))?.slice(key.length + 1);
   const review = get('review'), source = get('source'), outcome = get('outcome'), episode = get('episode');
@@ -18,7 +18,6 @@ export function parseTags(tags: string[]): {
     review: review === 'keep' || review === 'discard' ? review : undefined,
     source: source === 'policy' || source === 'correction' ? source : undefined,
     outcome: OUTCOMES.find((o) => o === outcome),
-    checkpoint: get('checkpoint'),
     episode: episode !== undefined && episode !== '' && Number.isInteger(Number(episode)) ? Number(episode) : undefined,
   };
 }

@@ -56,7 +56,7 @@ type engineDeps struct {
 	now                   func() time.Time
 	sleep                 func(ctx context.Context, d time.Duration) error
 	newID                 func() string
-	logger                logging.Logger // may be nil
+	logger                logging.Logger
 }
 
 type engine struct {
@@ -167,9 +167,7 @@ func (e *engine) finish(outcome, errMsg string) {
 	e.seg.TEnd, e.seg.Outcome, e.seg.Error = e.now(), outcome, errMsg
 	if err := appendSegment(e.logDir, *e.seg); err != nil {
 		e.lastErr = "session log: " + err.Error()
-		if e.logger != nil {
-			e.logger.Errorw("session log write failed", "error", err)
-		}
+		e.logger.Errorw("session log write failed", "error", err)
 	}
 	e.sess.Counts[e.seg.Source+":"+outcome]++
 	e.seg = nil
@@ -326,11 +324,7 @@ func (e *engine) tick(ctx context.Context) {
 	e.capturing = true
 	e.seg.Captured = true
 	e.mu.Unlock()
-	_, err = call(ctx, e.capture, map[string]interface{}{
-		"start_capture": true, "frequency_hz": sess.FPS,
-		"tags": []string{"task:" + sess.Task, "session:" + sess.ID, fmt.Sprintf("episode:%d", sess.Episodes),
-			"source:policy", "checkpoint:" + sess.Checkpoint, fmt.Sprintf("fps:%g", sess.FPS)},
-	}, e.timings.call)
+	_, err = call(ctx, e.capture, captureCmd(sess, "policy"), e.timings.call)
 	if err != nil {
 		e.abort(opOutcome(ctx), "start capture: "+err.Error())
 		return
@@ -339,6 +333,14 @@ func (e *engine) tick(ctx context.Context) {
 	e.seg.TStart, e.phase = e.now(), phasePolicy
 	e.statusFails, e.lastPoll = 0, e.now()
 	e.mu.Unlock()
+}
+
+func captureCmd(sess session, source string) map[string]interface{} {
+	return map[string]interface{}{
+		"start_capture": true, "frequency_hz": sess.FPS,
+		"tags": []string{"task:" + sess.Task, "session:" + sess.ID, fmt.Sprintf("episode:%d", sess.Episodes),
+			"source:" + source, "checkpoint:" + sess.Checkpoint, fmt.Sprintf("fps:%g", sess.FPS)},
+	}
 }
 
 // stopExecutorAndWait stops the executor and waits (bounded by execStop) until it leaves running.
@@ -379,9 +381,7 @@ func (e *engine) abort(outcome, msg string) {
 	if ph != phaseStarting && ph != phasePolicy && ph != phaseCorrection {
 		return
 	}
-	if e.logger != nil {
-		e.logger.Warnw("episode aborted", "outcome", outcome, "message", msg)
-	}
+	e.logger.Warnw("episode aborted", "outcome", outcome, "message", msg)
 	bg := context.Background()
 	if (ph == phaseStarting || ph == phasePolicy) && !execDone {
 		_, _ = call(bg, e.exec, map[string]interface{}{"command": "stop"}, e.timings.execStop)
@@ -421,15 +421,11 @@ func (e *engine) takeOver(ctx context.Context) error {
 		e.abort(opOutcome(ctx), "stop executor: "+err.Error())
 		return err
 	}
-	e.mu.Lock()
-	e.execStopped = true
-	e.mu.Unlock()
 	if _, err := call(ctx, e.capture, map[string]interface{}{"stop_capture": true}, e.timings.call); err != nil {
 		e.abort(opOutcome(ctx), "stop capture: "+err.Error())
 		return err
 	}
 	e.mu.Lock()
-	e.capturing = false
 	e.finish("takeover", "")
 	sess := *e.sess
 	e.seg = &segment{Session: sess.ID, Episode: sess.Episodes, Source: "correction",
@@ -438,11 +434,7 @@ func (e *engine) takeOver(ctx context.Context) error {
 	e.seg.Captured = true
 	e.mu.Unlock()
 
-	_, err := call(ctx, e.capture, map[string]interface{}{
-		"start_capture": true, "frequency_hz": sess.FPS,
-		"tags": []string{"task:" + sess.Task, "session:" + sess.ID, fmt.Sprintf("episode:%d", sess.Episodes),
-			"source:correction", "checkpoint:" + sess.Checkpoint, fmt.Sprintf("fps:%g", sess.FPS)},
-	}, e.timings.call)
+	_, err := call(ctx, e.capture, captureCmd(sess, "correction"), e.timings.call)
 	if err != nil {
 		e.abort(opOutcome(ctx), "start correction capture: "+err.Error())
 		return err

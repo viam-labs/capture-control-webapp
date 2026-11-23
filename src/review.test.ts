@@ -13,15 +13,14 @@ test('parseTags reads task, session and review', () => {
     review: 'keep',
     source: undefined,
     outcome: undefined,
-    checkpoint: undefined,
     episode: undefined,
   });
   assert.equal(rv.parseTags(['task:x', 'review:maybe']).review, undefined);
 });
 
-test('parseTags reads runner source, outcome, checkpoint and episode', () => {
-  const p = rv.parseTags(['source:correction', 'outcome:takeover', 'checkpoint:ckpt-1', 'episode:7', 'outcome:bogus']);
-  assert.deepEqual([p.source, p.outcome, p.checkpoint, p.episode], ['correction', 'takeover', 'ckpt-1', 7]);
+test('parseTags reads runner source, outcome and episode', () => {
+  const p = rv.parseTags(['source:correction', 'outcome:takeover', 'episode:7', 'outcome:bogus']);
+  assert.deepEqual([p.source, p.outcome, p.episode], ['correction', 'takeover', 7]);
   const q = rv.parseTags(['source:other', 'outcome:bogus', 'episode:x']);
   assert.deepEqual([q.source, q.outcome, q.episode], [undefined, undefined, undefined]);
 });

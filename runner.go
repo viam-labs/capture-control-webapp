@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -177,13 +178,13 @@ func (r *runner) DoCommand(ctx context.Context, cmd map[string]interface{}) (map
 		if err != nil {
 			return nil, err
 		}
-		out := make([]interface{}, len(segs))
-		for i, s := range segs {
-			out[i] = map[string]interface{}{
-				"session": s.Session, "episode": s.Episode, "source": s.Source, "task": s.Task,
-				"checkpoint": s.Checkpoint, "t_start": s.TStart.Format(time.RFC3339Nano),
-				"t_end": s.TEnd.Format(time.RFC3339Nano), "outcome": s.Outcome, "error": s.Error, "captured": s.Captured,
-			}
+		b, err := json.Marshal(segs) // segment's json tags are the wire format
+		if err != nil {
+			return nil, err
+		}
+		var out []interface{}
+		if err := json.Unmarshal(b, &out); err != nil {
+			return nil, err
 		}
 		return map[string]interface{}{"segments": out}, nil
 	}
