@@ -70,7 +70,7 @@ type engine struct {
 	startedAt   time.Time
 	lastErr     string
 	opCancel    context.CancelFunc
-	stopping    bool // stop is waiting for opMu: new operations start cancelled
+	stopping    int  // stop calls waiting for opMu: new operations start cancelled
 	statusFails int  // consecutive failed status polls while starting
 	execStopped bool // takeOver already stopped the executor; abort need not wait on it again
 }
@@ -138,7 +138,7 @@ func (e *engine) beginOp(ctx context.Context) (context.Context, func()) {
 	c, cancel := context.WithCancel(ctx)
 	e.mu.Lock()
 	e.opCancel = cancel
-	if e.stopping {
+	if e.stopping > 0 {
 		cancel()
 	}
 	e.mu.Unlock()
@@ -185,18 +185,17 @@ func (e *engine) startEpisode(ctx context.Context) error {
 		Task: e.sess.Task, Checkpoint: e.sess.Checkpoint, TStart: e.now()}
 	e.lastErr = ""
 	task := e.sess.Task
-	e.mu.Unlock()
-
-	_, err := call(ctx, e.exec, map[string]interface{}{"command": "start", "task": task}, e.timings.call)
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if err != nil {
-		e.finish(opOutcome(ctx), err.Error())
-		return err
-	}
+	// Starting before the RPC: a cancelled or timed-out start may still have started the
+	// executor, so abort must send it a stop.
 	e.phase, e.statusFails = phaseStarting, 0
 	e.startedAt = e.now()
 	e.lastBeat, e.lastPoll = e.startedAt, e.startedAt
+	e.mu.Unlock()
+
+	if _, err := call(ctx, e.exec, map[string]interface{}{"command": "start", "task": task}, e.timings.call); err != nil {
+		e.abort(opOutcome(ctx), err.Error())
+		return err
+	}
 	return nil
 }
 
@@ -262,6 +261,9 @@ func (e *engine) tick(ctx context.Context) {
 		state, _ = st["state"].(string)
 		lastErr, _ = st["last_error"].(string)
 	}
+	if err == nil && ph == phasePolicy && state == "running" && lastErr != "" {
+		e.lastErr = lastErr // recorded, not acted on
+	}
 	fails := e.statusFails
 	late := e.now().Sub(e.startedAt) > e.timings.policyStart
 	sess := *e.sess
@@ -324,12 +326,17 @@ func (e *engine) tick(ctx context.Context) {
 }
 
 // stopExecutorAndWait stops the executor and waits (bounded by execStop) until it leaves running.
+// The stop RPC itself is never cancelled by the operation's ctx (the executor's stop handler
+// must run to completion); cancellation only interrupts the wait that follows.
 func (e *engine) stopExecutorAndWait(ctx context.Context) error {
-	ctx, cancel := context.WithTimeout(ctx, e.timings.execStop)
-	defer cancel()
-	if _, err := call(ctx, e.exec, map[string]interface{}{"command": "stop"}, e.timings.execStop); err != nil {
+	if _, err := call(context.WithoutCancel(ctx), e.exec, map[string]interface{}{"command": "stop"}, e.timings.execStop); err != nil {
 		return err
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, e.timings.execStop)
+	defer cancel()
 	for {
 		st, err := call(ctx, e.exec, map[string]interface{}{"command": "status"}, e.timings.call)
 		if err != nil {
@@ -355,7 +362,7 @@ func (e *engine) abort(outcome, msg string) {
 	}
 	bg := context.Background()
 	if (ph == phaseStarting || ph == phasePolicy) && !execDone {
-		_, _ = call(bg, e.exec, map[string]interface{}{"command": "stop"}, e.timings.call)
+		_, _ = call(bg, e.exec, map[string]interface{}{"command": "stop"}, e.timings.execStop)
 	}
 	if ph == phaseCorrection && e.teleop != nil {
 		_, _ = call(bg, e.teleop, map[string]interface{}{"command": "stop"}, e.timings.call)
@@ -472,10 +479,11 @@ func (e *engine) label(ctx context.Context, outcome string) error {
 }
 
 // stop ends the session: it cancels any operation in flight (which aborts as
-// "stopped"), then aborts an open episode. Idempotent.
+// "stopped"), then aborts an open episode. Idempotent. The cleanup deliberately
+// ignores ctx: a caller giving up must not leave the executor or capture running.
 func (e *engine) stop(ctx context.Context) error {
 	e.mu.Lock()
-	e.stopping = true
+	e.stopping++
 	if e.opCancel != nil {
 		e.opCancel()
 	}
@@ -485,7 +493,7 @@ func (e *engine) stop(ctx context.Context) error {
 	e.abort("stopped", "stopped by operator") // no-op unless an episode is open
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.stopping = false
+	e.stopping--
 	e.sess, e.seg, e.phase, e.lastErr = nil, nil, phaseNoSession, ""
 	return nil
 }

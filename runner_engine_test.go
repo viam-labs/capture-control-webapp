@@ -570,25 +570,50 @@ func TestLastErrorWhileRunningIsTolerated(t *testing.T) {
 	}
 }
 
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	for end := time.Now().Add(time.Second); time.Now().Before(end); time.Sleep(time.Millisecond) {
+		if cond() {
+			return
+		}
+	}
+	t.Fatalf("timed out waiting for %s", what)
+}
+
+func hasName(f *fakeDoer, name string) func() bool {
+	return func() bool {
+		for _, n := range f.names() {
+			if n == name {
+				return true
+			}
+		}
+		return false
+	}
+}
+
 func TestStopPreemptsBlockedTakeover(t *testing.T) {
 	r := newRig(t, true)
 	ctx := context.Background()
 	inPolicy(t, r)
-	r.e.timings.execStop = 2 * time.Second // take_over's wait would run this long without pre-emption
-	r.e.timings.call = 50 * time.Millisecond
-	r.exec.block = make(chan struct{}) // executor stop hangs until its context ends
+	r.e.timings.execStop = 2 * time.Second
+	r.exec.block = make(chan struct{}) // executor stop hangs; its RPC is not cancelled by stop
 	done := make(chan error, 1)
 	go func() { done <- r.e.takeOver(ctx) }()
-	time.Sleep(20 * time.Millisecond)
+	waitFor(t, "take_over's executor stop", hasName(r.exec, "stop"))
 	stopped := make(chan error, 1)
 	start := time.Now()
 	go func() { stopped <- r.e.stop(ctx) }()
+	waitFor(t, "stop to cancel the operation", func() bool {
+		r.e.mu.Lock()
+		defer r.e.mu.Unlock()
+		return r.e.stopping > 0
+	})
+	close(r.exec.block) // the stop RPC completes; take_over must notice the cancellation, not carry on
 	select {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("take_over must return once stop cancels it, well inside execStop")
 	}
-	close(r.exec.block) // let abort's best-effort stop finish
 	if err := <-stopped; err != nil {
 		t.Fatal(err)
 	}
@@ -604,6 +629,33 @@ func TestStopPreemptsBlockedTakeover(t *testing.T) {
 	}
 	if err := r.e.stop(ctx); err != nil {
 		t.Fatal("stop must be idempotent")
+	}
+}
+
+func TestStopDuringBlockedExecutorStart(t *testing.T) {
+	r := newRig(t, true)
+	ctx := context.Background()
+	startedSession(t, r)
+	r.exec.block = make(chan struct{})
+	done := make(chan error, 1)
+	go func() { done <- r.e.startEpisode(ctx) }()
+	waitFor(t, "executor start", hasName(r.exec, "start"))
+	stopped := make(chan error, 1)
+	go func() { stopped <- r.e.stop(ctx) }()
+	waitFor(t, "abort's executor stop", hasName(r.exec, "stop"))
+	close(r.exec.block)
+	if err := <-stopped; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err == nil {
+		t.Fatal("a cancelled start_episode must fail")
+	}
+	if r.e.status()["state"] != "no_session" {
+		t.Fatal("stop ends the session")
+	}
+	segs, _ := readSegments(r.e.logDir, "s1")
+	if len(segs) != 1 || segs[0].Outcome != "stopped" {
+		t.Fatalf("log %v", segs)
 	}
 }
 
