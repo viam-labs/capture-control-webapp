@@ -478,8 +478,11 @@ Behaviour (spec "Episode state machine" and "Safety"):
   (`Source: "policy"`, episode number, task, checkpoint); sends `executor.start(task)` bounded by `timings.call`. On
   error: log the segment with `outcome: "error"`, `Error: <err>`, stay idle, return the error. On success:
   `phase = starting`, `startedAt = lastBeat = lastPoll = now()`. Returns without waiting for `running`.
-- `tick(ctx)` (called by the monitor goroutine every 50 ms; tests call it directly). In `starting`, at most once per
-  `timings.startPoll`: read executor `status`.
+- `tick(ctx)` (called by the monitor goroutine every 50 ms; tests call it directly). **Every transition or abort that
+  `tick` starts takes `opMu` first, then re-checks the phase (and, for heartbeat aborts, the heartbeat) before acting**,
+  so a poll that reads `state: stopped` while `take_over` or `label` is stopping the executor never aborts mid-transition.
+  `abort` itself must not take `opMu` (the operations call it while holding it). Status reads happen without `opMu`.
+  In `starting`, at most once per `timings.startPoll`: read executor `status`.
   - `waiting_for_policy`: if `now - startedAt > policyStart` → `abort("error", "policy did not start within …")`.
   - `running`: take opMu, re-check the phase is still `starting`, `start_capture` with `frequency_hz = fps` and tags
     `task:<task>`, `session:<id>`, `episode:<n>`, `source:policy`, `checkpoint:<checkpoint>`, `fps:<fps formatted
@@ -779,17 +782,30 @@ func TestStopPreemptsBlockedTakeover(t *testing.T) {
 	r := newRig(t, true)
 	ctx := context.Background()
 	toPolicy(t, r)
-	r.exec.block = make(chan struct{}) // executor stop hangs
+	r.e.timings.execStop = 2 * time.Second // take_over's wait would run this long without pre-emption
+	r.e.timings.call = 50 * time.Millisecond
+	r.exec.block = make(chan struct{}) // executor stop hangs until its context ends
 	done := make(chan error, 1)
 	go func() { done <- r.e.takeOver(ctx) }()
 	time.Sleep(20 * time.Millisecond)
-	if err := r.e.stop(ctx); err != nil {
-		t.Fatal(err)
-	}
+	stopped := make(chan error, 1)
+	start := time.Now()
+	go func() { stopped <- r.e.stop(ctx) }()
 	select {
 	case <-done:
 	case <-time.After(time.Second):
-		t.Fatal("take_over must return once stop cancels it")
+		t.Fatal("take_over must return once stop cancels it, well inside execStop")
+	}
+	close(r.exec.block) // let abort's best-effort stop finish
+	if err := <-stopped; err != nil {
+		t.Fatal(err)
+	}
+	if time.Since(start) > 1500*time.Millisecond {
+		t.Fatal("stop must pre-empt, not wait out execStop")
+	}
+	segs, _ := readSegments(r.e.logDir, "s1")
+	if len(segs) == 0 || segs[0].Outcome != "stopped" {
+		t.Fatalf("a pre-empted take_over must log the policy segment as stopped, got %v", segs)
 	}
 	if r.e.status()["state"] != "no_session" {
 		t.Fatal("stop ends the session")
@@ -798,12 +814,53 @@ func TestStopPreemptsBlockedTakeover(t *testing.T) {
 		t.Fatal("stop must be idempotent")
 	}
 }
+
+func TestHeartbeatsKeepSlowTakeoverAlive(t *testing.T) {
+	r := newRig(t, true)
+	ctx := context.Background()
+	toPolicy(t, r)
+	r.exec.block = make(chan struct{})
+	done := make(chan error, 1)
+	go func() { done <- r.e.takeOver(ctx) }()
+	for i := 0; i < 5; i++ { // 5 s of operator heartbeats while take_over is blocked
+		time.Sleep(5 * time.Millisecond)
+		r.clock.advance(time.Second)
+		r.e.heartbeat()
+		r.e.tick(ctx) // must neither abort nor block forever: it waits for opMu only to act
+	}
+	close(r.exec.block)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if r.e.status()["state"] != "correction" {
+		t.Fatal("heartbeats during a slow takeover must keep it alive")
+	}
+}
+
+func TestCallTimeoutStopsEverything(t *testing.T) {
+	r := newRig(t, true)
+	ctx := context.Background()
+	toPolicy(t, r)
+	r.e.timings.call = 30 * time.Millisecond
+	r.e.timings.execStop = 30 * time.Millisecond
+	r.capture.block = make(chan struct{}) // stop_capture hangs past call_timeout
+	if err := r.e.label(ctx, "success"); err == nil {
+		t.Fatal("a timed-out dependency call must fail the label")
+	}
+	close(r.capture.block)
+	if r.e.status()["state"] != "idle" {
+		t.Fatal("a call timeout must stop everything")
+	}
+	segs, _ := readSegments(r.e.logDir, "s1")
+	if segs[len(segs)-1].Outcome != "error" {
+		t.Fatalf("log %v", segs)
+	}
+}
 ```
 
-Note for the last test: `abort` uses fresh contexts, so the hanging fake also blocks `abort`'s executor stop until its
-own timeout. Give `abort`'s best-effort calls a short bound in tests by setting `r.e.timings.execStop` and
-`r.e.timings.call` to 50 ms in that test before calling `stop`, or unblock with `close(r.exec.block)` right after
-`stop` is called from a goroutine. Pick one and keep the test deterministic.
+For `TestHeartbeatsKeepSlowTakeoverAlive`, `tick` must not block on `opMu` when nothing needs acting on: it decides from
+a lock-free snapshot whether a transition or abort is due, and only then takes `opMu` (use `TryLock` for the heartbeat
+case, or decide first and lock only when acting).
 
 - [ ] **Step 2:** run → FAIL. **Step 3:** implement. **Step 4:** `go test ./... -race -v` → PASS (run with `-race`).
 - [ ] **Step 5: Commit**: `git commit -am "Episode runner: heartbeat watchdog, run polling, stop pre-empts operations"`
@@ -1021,7 +1078,9 @@ resource.APIModel{API: generic.API, Model: capturecontrolwebapp.RunnerModel})`.
 - [ ] **Step 1: Failing tests** `runner_test.go`: `Validate` (missing executor → error; missing capture_sensor →
   error; teleop listed as optional only); `timings()` applies overrides and keeps defaults for zeros; `DoCommand` on a
   `runner{e: <engine from newRig>}`: `status` has `episode_runner`, unknown command errors, `start_session` then
-  `status` shows the session, `log` returns `segments`.
+  `status` shows the session, `log` returns `segments`; `Close` on a runner whose engine is in `policy` stops the
+  executor and capture and logs the segment `stopped` (build the runner by hand with `cancel` and a closed `done`
+  channel, or factor the goroutine start so the test can use it).
 - [ ] **Step 2:** FAIL. **Step 3:** implement. **Step 4:** `go test ./... -race` and `go build ./...` → PASS.
 - [ ] **Step 5: Commit**: `git commit -am "Episode runner: Viam resource, config, registration"`
 
@@ -1108,7 +1167,8 @@ Requirements (spec "Web app"):
   - Keys (ignored while typing in inputs, like the recorder): Space → `start_episode` (idle); S/F → `label`
     `success`/`failure` (policy or correction); T → `take_over` (policy); H → home (idle); Esc → `stop`; `?` → shortcut
     overlay.
-  - **End session** → `stop`, then fetch `log` and show the summary from `summary()` (success rate as a percentage
+  - **End session** → save the session id from the last `status` first (`stop` clears the session, so a bare `log`
+    would return nothing), `stop`, then fetch `log` with `{session: <id>}` and show the summary from `summary()` (success rate as a percentage
     with the judged count, corrections count), with a **Review session** button that opens the existing Review for that
     session id.
   - On component destroy with an active episode: send `stop` (best effort).
@@ -1132,7 +1192,8 @@ Requirements (spec "Web app"):
     `log` for that session and, as sequences sync, apply `setOutcome` to each sequence whose `outcomeFor` result differs
     from its current `outcome:` tag. Show the outcome beside the review state in the episode list.
 - `README.md`: an **Episode runner** section (anchor `#episode-runner`): what it does; the config block from the spec;
-  the dependency contracts table; `teleop_safe_takeover` and the pose check (record Task 1's result for the SO-101);
+  the dependency contracts table; `teleop_safe_takeover` (defaults to **false**: `take_over` is refused until it is set
+  true for a teleop device that passed the pose check; record Task 1's result for the SO-101);
   the Policy session keys; the tags and the session log location; the safety behaviour.
 
 - [ ] **Step 1:** implement. **Step 2:** `make test` (Go + TS) and `npm run check` → pass. **Step 3: Commit**:
