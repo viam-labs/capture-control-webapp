@@ -475,13 +475,17 @@ git commit -m "Episode runner: engine states, session, status, heartbeat, sessio
 
 Behaviour (spec "Episode state machine" and "Safety"):
 - `startEpisode(ctx)` (opMu): only in idle with a session. Increments `sess.Episodes`; opens a policy segment
-  (`Source: "policy"`, episode number, task, checkpoint); sends `executor.start(task)` bounded by `timings.call`. On
+  (`Source: "policy"`, episode number, task, checkpoint, `TStart = now()` so status shows a sensible elapsed time
+  while the policy loads; reset `TStart` when capture starts); sends `executor.start(task)` bounded by `timings.call`. On
   error: log the segment with `outcome: "error"`, `Error: <err>`, stay idle, return the error. On success:
   `phase = starting`, `startedAt = lastBeat = lastPoll = now()`. Returns without waiting for `running`.
 - `tick(ctx)` (called by the monitor goroutine every 50 ms; tests call it directly). **Every transition or abort that
   `tick` starts takes `opMu` first, then re-checks the phase (and, for heartbeat aborts, the heartbeat) before acting**,
   so a poll that reads `state: stopped` while `take_over` or `label` is stopping the executor never aborts mid-transition.
   `abort` itself must not take `opMu` (the operations call it while holding it). Status reads happen without `opMu`.
+  **`tick` never blocks on `opMu`: it uses `opMu.TryLock()` and, if the lock is busy (an operation is in flight),
+  returns and retries on the next tick.** Otherwise a run poll that reads `stopped` during a blocked `take_over` would
+  wait on `opMu` forever.
   In `starting`, at most once per `timings.startPoll`: read executor `status`.
   - `waiting_for_policy`: if `now - startedAt > policyStart` → `abort("error", "policy did not start within …")`.
   - `running`: take opMu, re-check the phase is still `starting`, `start_capture` with `frequency_hz = fps` and tags
@@ -615,6 +619,14 @@ func TestExecutorErrorDuringStartingAborts(t *testing.T) {
 	}
 }
 ```
+
+Also in this task (small hardening from the Task 2 review):
+- `startSession`: reject a NaN fps (`!(fps > 0)` → default 10).
+- `readSegments`: `sc.Buffer(nil, 1<<20)` so a long error string cannot drop later lines.
+- Test fakes: guard `rig.slept` with a mutex and add a locked `calls()` accessor on `fakeDoer`; use it instead of
+  reading `f.calls` directly in tests.
+- Add to `TestStartEpisodeWaitsForRunningBeforeCapture`: while `starting`, `status()["episode"]["started"]` equals
+  the clock's time in ms (not a zero time).
 
 - [ ] **Step 2: Run to verify they fail**: `go test ./... -run 'TestStartEpisode|TestPolicyStart|TestLabelSuccess|TestExecutorRefuses|TestExecutorErrorDuring'` → FAIL.
 - [ ] **Step 3: Implement** the behaviour above in `runner_engine.go`, replacing the `startEpisode` and `label`
@@ -858,9 +870,9 @@ func TestCallTimeoutStopsEverything(t *testing.T) {
 }
 ```
 
-For `TestHeartbeatsKeepSlowTakeoverAlive`, `tick` must not block on `opMu` when nothing needs acting on: it decides from
-a lock-free snapshot whether a transition or abort is due, and only then takes `opMu` (use `TryLock` for the heartbeat
-case, or decide first and lock only when acting).
+For `TestHeartbeatsKeepSlowTakeoverAlive`, `tick` must never block on `opMu` (Task 3's `TryLock` rule): the fake
+executor reports `stopped` while its `stop` is blocked, so a run poll in that window would otherwise wait on `opMu`
+forever.
 
 - [ ] **Step 2:** run → FAIL. **Step 3:** implement. **Step 4:** `go test ./... -race -v` → PASS (run with `-race`).
 - [ ] **Step 5: Commit**: `git commit -am "Episode runner: heartbeat watchdog, run polling, stop pre-empts operations"`
@@ -950,10 +962,10 @@ type runner struct {
 	done   chan struct{}
 }
 
-func newID() string {
-	b := make([]byte, 6)
+func newID() string { // names the log file: time prefix + random suffix so sessions never collide
+	b := make([]byte, 4)
 	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
+	return time.Now().UTC().Format("20060102T150405") + "-" + hex.EncodeToString(b)
 }
 
 func moduleLogDir() string {
@@ -977,7 +989,7 @@ func newRunner(ctx context.Context, deps resource.Dependencies, raw resource.Con
 	if err != nil {
 		return nil, fmt.Errorf("capture_sensor %q: %w", conf.CaptureSensor, err)
 	}
-	var teleop doer
+	var teleop doer // must stay a nil interface when unset: a typed nil would pass the take_over refusal check
 	if conf.Teleop != "" {
 		t, err := generic.FromProvider(deps, conf.Teleop)
 		if err != nil {
