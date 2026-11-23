@@ -70,7 +70,8 @@ type engine struct {
 	startedAt   time.Time
 	lastErr     string
 	opCancel    context.CancelFunc
-	statusFails int // consecutive failed status polls while starting
+	statusFails int  // consecutive failed status polls while starting
+	execStopped bool // takeOver already stopped the executor; abort need not wait on it again
 }
 
 func newEngine(d engineDeps) *engine {
@@ -175,6 +176,7 @@ func (e *engine) startEpisode(ctx context.Context) error {
 		return fmt.Errorf("start_episode not allowed in %s", e.phase)
 	}
 	e.sess.Episodes++
+	e.execStopped = false
 	e.seg = &segment{Session: e.sess.ID, Episode: e.sess.Episodes, Source: "policy",
 		Task: e.sess.Task, Checkpoint: e.sess.Checkpoint, TStart: e.now()}
 	e.lastErr = ""
@@ -252,6 +254,10 @@ func (e *engine) tick(ctx context.Context) {
 		e.abort("error", abortMsg)
 		return
 	}
+	// Set before the call: a timed-out start may still have begun recording, and abort must stop it.
+	e.mu.Lock()
+	e.capturing = true
+	e.mu.Unlock()
 	_, err = call(ctx, e.capture, map[string]interface{}{
 		"start_capture": true, "frequency_hz": sess.FPS,
 		"tags": []string{"task:" + sess.Task, "session:" + sess.ID, fmt.Sprintf("episode:%d", sess.Episodes),
@@ -262,7 +268,7 @@ func (e *engine) tick(ctx context.Context) {
 		return
 	}
 	e.mu.Lock()
-	e.capturing, e.seg.TStart, e.phase = true, e.now(), phasePolicy
+	e.seg.TStart, e.phase = e.now(), phasePolicy
 	e.mu.Unlock()
 }
 
@@ -291,13 +297,13 @@ func (e *engine) stopExecutorAndWait(ctx context.Context) error {
 // It leaves the session open and the phase idle. Safe to call twice.
 func (e *engine) abort(outcome, msg string) {
 	e.mu.Lock()
-	ph, capt := e.phase, e.capturing
+	ph, capt, execDone := e.phase, e.capturing, e.execStopped
 	e.mu.Unlock()
 	if ph != phaseStarting && ph != phasePolicy && ph != phaseCorrection {
 		return
 	}
 	bg := context.Background()
-	if ph == phaseStarting || ph == phasePolicy {
+	if (ph == phaseStarting || ph == phasePolicy) && !execDone {
 		_, _ = call(bg, e.exec, map[string]interface{}{"command": "stop"}, e.timings.execStop)
 	}
 	if ph == phaseCorrection && e.teleop != nil {
@@ -335,6 +341,9 @@ func (e *engine) takeOver(ctx context.Context) error {
 		e.abort("error", "stop executor: "+err.Error())
 		return err
 	}
+	e.mu.Lock()
+	e.execStopped = true
+	e.mu.Unlock()
 	if _, err := call(ctx, e.capture, map[string]interface{}{"stop_capture": true}, e.timings.call); err != nil {
 		e.abort("error", "stop capture: "+err.Error())
 		return err
@@ -344,7 +353,8 @@ func (e *engine) takeOver(ctx context.Context) error {
 	e.finish("takeover", "")
 	sess := *e.sess
 	e.seg = &segment{Session: sess.ID, Episode: sess.Episodes, Source: "correction",
-		Task: sess.Task, Checkpoint: sess.Checkpoint}
+		Task: sess.Task, Checkpoint: sess.Checkpoint, TStart: e.now()}
+	e.capturing = true // before the call: a timed-out start may still be recording
 	e.mu.Unlock()
 
 	_, err := call(ctx, e.capture, map[string]interface{}{
@@ -357,7 +367,7 @@ func (e *engine) takeOver(ctx context.Context) error {
 		return err
 	}
 	e.mu.Lock()
-	e.capturing, e.seg.TStart = true, e.now()
+	e.seg.TStart = e.now()
 	e.mu.Unlock()
 	if err := e.sleep(ctx, e.timings.hold); err != nil {
 		e.abort("error", "hold: "+err.Error())

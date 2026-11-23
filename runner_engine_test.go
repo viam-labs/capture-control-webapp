@@ -467,3 +467,55 @@ func TestTakeoverRefusedWithoutTeleop(t *testing.T) {
 	r.e.teleop = nil
 	refusedTakeover(t, r)
 }
+
+func TestTakeoverTeleopStartFailure(t *testing.T) {
+	r := newRig(t, true)
+	inPolicy(t, r)
+	r.teleop.failOn = "start"
+	if err := r.e.takeOver(context.Background()); err == nil {
+		t.Fatal("expected the teleop failure")
+	}
+	if got := r.teleop.names(); got[len(got)-1] != "stop" {
+		t.Fatalf("teleop %v", got)
+	}
+	if got := r.capture.names(); got[len(got)-1] != "stop_capture" {
+		t.Fatalf("capture %v", got)
+	}
+	segs, _ := readSegments(r.e.logDir, "s1")
+	if r.e.status()["state"] != "idle" || len(segs) != 2 || segs[0].Outcome != "takeover" ||
+		segs[1].Source != "correction" || segs[1].Outcome != "error" {
+		t.Fatalf("status %v log %v", r.e.status(), segs)
+	}
+	if len(r.exec.names()) != 2 { // start, stop: abort must not stop the executor again
+		t.Fatalf("executor %v", r.exec.names())
+	}
+}
+
+func TestTakeoverCaptureStartFailure(t *testing.T) {
+	r := newRig(t, true)
+	inPolicy(t, r)
+	r.capture.failOn = "start_capture"
+	if err := r.e.takeOver(context.Background()); err == nil {
+		t.Fatal("expected the capture failure")
+	}
+	if got := r.capture.names(); got[len(got)-1] != "stop_capture" {
+		t.Fatalf("capture %v", got)
+	}
+	segs, _ := readSegments(r.e.logDir, "s1")
+	if r.e.status()["state"] != "idle" || len(segs) != 2 || segs[1].Outcome != "error" || segs[1].TStart.IsZero() {
+		t.Fatalf("status %v log %v", r.e.status(), segs)
+	}
+}
+
+func TestPolicyCaptureStartFailureStopsCapture(t *testing.T) {
+	r := newRig(t, true)
+	r.capture.failOn = "start_capture"
+	startedSession(t, r)
+	_ = r.e.startEpisode(context.Background())
+	r.exec.set("running")
+	r.clock.advance(250 * time.Millisecond)
+	r.e.tick(context.Background())
+	if got := r.capture.names(); got[len(got)-1] != "stop_capture" {
+		t.Fatalf("capture %v", got)
+	}
+}
