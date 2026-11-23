@@ -100,7 +100,7 @@ that device (config `teleop_safe_takeover: false`) and the gap goes upstream to 
 
 Commands not allowed in the current state return an error naming the state; nothing changes.
 
-**Concurrency.** `start_session`, `start_episode`, `take_over` and `label` are serialized by one operation lock and can
+**Concurrency.** `start_episode` returns as soon as the executor acks `start`; a background poller then moves `starting` → `policy` (or ends the episode), so no DoCommand blocks through a policy load. `start_session`, `start_episode`, `take_over` and `label` are serialized by one operation lock and can
 block for several seconds (an executor stop, a capture switch, the takeover hold). `heartbeat` and `status` never take
 that lock, so heartbeats keep arriving during a takeover and the watchdog does not fire mid-transition. `stop` never
 waits for the lock either: it cancels the in-flight operation's context, then runs the stop-everything path. A
@@ -150,9 +150,9 @@ the review code path that already tags sequences with the machine's credentials.
 
 ## Safety
 
-- **Heartbeat**: while the state is policy or correction, the web app sends `heartbeat` about every 500 ms. A gap of
+- **Heartbeat**: while the state is starting, policy or correction (a tab closed during a cold policy load must not leave the arm to start moving unattended), the web app sends `heartbeat` about every 500 ms. A gap of
   `heartbeat_timeout_ms` stops the executor, teleop and capture; the segment is logged `outcome: stopped`.
-- **Executor error**: the runner polls executor `status` about once a second in `starting` and `policy`. `state` of
+- **Executor error**: the runner polls executor `status` every 200 ms in `starting` and about once a second in `policy`. Capture starts on the first `running` poll, so a policy sequence can miss up to about 200 ms of the run's first motion; that is expected. `state` of
   `error`, or `stopped` / `idle` while it expects a run, ends the episode with `outcome: error`. `last_error` with
   `state: running` is logged, not acted on.
 - **Dependency timeout**: any bounded call that times out stops everything.
@@ -168,7 +168,7 @@ the review code path that already tags sequences with the machine's credentials.
 - **`PolicySession.svelte`** (reuses `CameraFeed` and the home flow; during a policy run or correction it talks only
   to the runner):
   setup (task from the saved list, checkpoint label, fps); live view (state, episode, elapsed, session tally of
-  successes, failures and takeovers); heartbeat while active.
+  successes, failures and takeovers); heartbeat while starting, policy or correction.
 
   | Key | Action |
   |---|---|
@@ -188,7 +188,7 @@ the review code path that already tags sequences with the machine's credentials.
 - **Go**: state-machine tests with fake executor, teleop and capture: every transition and refusal; `starting` holds
   through `waiting_for_policy` and starts capture only on `running`; start timeout; `last_error` with `running` does
   not end a run, `state: error` does; takeover order (executor stopped → capture switched → hold → teleop started);
-  heartbeats during a slow takeover keep it alive; `stop` pre-empts a blocked `take_over`; heartbeat loss, executor
+  heartbeats during a slow takeover keep it alive; heartbeat loss during `starting` stops the executor; `start_episode` returns before the executor reaches `running`; `stop` pre-empts a blocked `take_over`; heartbeat loss, executor
   error and call timeout each stop everything; idempotent stop; log lines; reconfigure stops a running episode.
 - **TypeScript**: session logic and log → tag mapping, in the style of `capture.test.ts` and `review.test.ts`.
 - **Teleop pose check (first task)**: on an SO-101, move the follower away from the leader with teleop off, start
